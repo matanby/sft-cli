@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from enum import Enum
 from pathlib import Path
 
@@ -16,17 +15,13 @@ from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Input, Label, Static, Tree
 from textual.widgets.tree import TreeNode
 
-from sft.index import PrefixTree, PrefixTreeNode, TensorIndex, TensorInfo
-
-
-def natural_sort_key(s: str) -> list:
-    """Generate a sort key for natural (human) sorting.
-
-    Splits string into text and numeric parts so that numbers are
-    compared numerically: 'layer.2' < 'layer.10' instead of 'layer.10' < 'layer.2'.
-    """
-    parts = re.split(r"(\d+)", s)
-    return [int(part) if part.isdigit() else part.lower() for part in parts]
+from sft.index import (
+    PrefixTree,
+    PrefixTreeNode,
+    TensorIndex,
+    TensorInfo,
+    natural_sort_key,
+)
 
 
 def format_bytes(nbytes: int) -> str:
@@ -661,11 +656,6 @@ class TensorTable(DataTable):
             self._tensors.sort(key=lambda t: (-t.rank, natural_sort_key(t.full_name)))
 
         self._refresh_table()
-
-    def filter_by_search(self, query: str) -> None:
-        """Filter tensors by search query."""
-        # This is called from the app with the full tensor list
-        pass
 
 
 class SearchInput(Input):

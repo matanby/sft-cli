@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from enum import Enum
 from pathlib import Path
 
@@ -16,6 +17,16 @@ from textual.widgets import DataTable, Footer, Input, Label, Static, Tree
 from textual.widgets.tree import TreeNode
 
 from sft.index import PrefixTree, PrefixTreeNode, TensorIndex, TensorInfo
+
+
+def natural_sort_key(s: str) -> list:
+    """Generate a sort key for natural (human) sorting.
+
+    Splits string into text and numeric parts so that numbers are
+    compared numerically: 'layer.2' < 'layer.10' instead of 'layer.10' < 'layer.2'.
+    """
+    parts = re.split(r"(\d+)", s)
+    return [int(part) if part.isdigit() else part.lower() for part in parts]
 
 
 def format_bytes(nbytes: int) -> str:
@@ -319,8 +330,14 @@ class FilterScreen(ModalScreen):
 class HierarchyTree(Tree):
     """Tree widget for navigating tensor namespaces."""
 
+    BINDINGS = [
+        Binding("left", "collapse_node", "Collapse", show=False),
+        Binding("right", "expand_node", "Expand", show=False),
+        Binding("enter", "toggle_node", "Toggle", show=False),
+    ]
+
     class NodeSelected(Message):
-        """Message sent when a tree node is selected."""
+        """Message sent when a tree node is selected or highlighted."""
 
         def __init__(self, prefix: str, node: PrefixTreeNode) -> None:
             self.prefix = prefix
@@ -357,26 +374,37 @@ class HierarchyTree(Tree):
 
     def _build_tree(self, parent: TreeNode, node: PrefixTreeNode, prefix: str) -> None:
         """Recursively build tree nodes."""
-        for child_name, child_node in sorted(node.children.items()):
+        for child_name, child_node in sorted(
+            node.children.items(), key=lambda x: natural_sort_key(x[0])
+        ):
             child_prefix = f"{prefix}.{child_name}" if prefix else child_name
 
-            tree_node = parent.add(
-                self._make_label(
-                    child_name,
-                    child_node.aggregate_count,
-                    child_node.aggregate_bytes,
-                ),
-                expand=False,
-            )
-            self._node_prefixes[tree_node] = child_prefix
-
-            # Recursively add children
+            # Use add_leaf for nodes without children (no expand icon)
+            # Use add for nodes with children (expandable)
             if child_node.children:
+                tree_node = parent.add(
+                    self._make_label(
+                        child_name,
+                        child_node.aggregate_count,
+                        child_node.aggregate_bytes,
+                    ),
+                    expand=False,
+                )
+                self._node_prefixes[tree_node] = child_prefix
                 self._build_tree(tree_node, child_node, child_prefix)
+            else:
+                tree_node = parent.add_leaf(
+                    self._make_label(
+                        child_name,
+                        child_node.aggregate_count,
+                        child_node.aggregate_bytes,
+                    ),
+                )
+                self._node_prefixes[tree_node] = child_prefix
 
-    def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
-        """Handle node selection."""
-        prefix = self._node_prefixes.get(event.node, "")
+    def _get_prefix_tree_node(self, tree_node: TreeNode) -> tuple[str, PrefixTreeNode]:
+        """Get the prefix and PrefixTreeNode for a given tree node."""
+        prefix = self._node_prefixes.get(tree_node, "")
 
         # Navigate to find the actual PrefixTreeNode
         node = self.prefix_tree.root
@@ -387,7 +415,30 @@ class HierarchyTree(Tree):
                 else:
                     break
 
+        return prefix, node
+
+    def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
+        """Handle node highlight (cursor movement) - update right panel."""
+        prefix, node = self._get_prefix_tree_node(event.node)
         self.post_message(self.NodeSelected(prefix, node))
+
+    def action_toggle_node(self) -> None:
+        """Toggle expand/collapse of the currently highlighted node."""
+        if self.cursor_node and self.cursor_node.children:
+            self.cursor_node.toggle()
+
+    def action_collapse_node(self) -> None:
+        """Collapse the currently highlighted node."""
+        if self.cursor_node and self.cursor_node.is_expanded:
+            self.cursor_node.collapse()
+        elif self.cursor_node and self.cursor_node.parent:
+            # If already collapsed, go to parent
+            self.select_node(self.cursor_node.parent)
+
+    def action_expand_node(self) -> None:
+        """Expand the currently highlighted node."""
+        if self.cursor_node and not self.cursor_node.is_expanded:
+            self.cursor_node.expand()
 
 
 class TensorTable(DataTable):
@@ -418,16 +469,8 @@ class TensorTable(DataTable):
         self.clear()
 
         for tensor in self._tensors:
-            # Strip prefix from name for relative display
-            if self._current_prefix and tensor.full_name.startswith(
-                self._current_prefix + "."
-            ):
-                display_name = tensor.full_name[len(self._current_prefix) + 1 :]
-            else:
-                display_name = tensor.full_name
-
             self.add_row(
-                display_name,
+                tensor.full_name,
                 format_shape(tensor.shape),
                 tensor.dtype,
                 format_bytes(tensor.nbytes),
@@ -443,17 +486,19 @@ class TensorTable(DataTable):
     def sort_by(self, mode: SortMode) -> None:
         """Sort tensors by the given mode."""
         if mode == SortMode.NAME_ASC:
-            self._tensors.sort(key=lambda t: t.full_name)
+            self._tensors.sort(key=lambda t: natural_sort_key(t.full_name))
         elif mode == SortMode.NAME_DESC:
-            self._tensors.sort(key=lambda t: t.full_name, reverse=True)
+            self._tensors.sort(
+                key=lambda t: natural_sort_key(t.full_name), reverse=True
+            )
         elif mode == SortMode.SIZE_ASC:
             self._tensors.sort(key=lambda t: t.nbytes)
         elif mode == SortMode.SIZE_DESC:
             self._tensors.sort(key=lambda t: t.nbytes, reverse=True)
         elif mode == SortMode.RANK_ASC:
-            self._tensors.sort(key=lambda t: (t.rank, t.full_name))
+            self._tensors.sort(key=lambda t: (t.rank, natural_sort_key(t.full_name)))
         elif mode == SortMode.RANK_DESC:
-            self._tensors.sort(key=lambda t: (-t.rank, t.full_name))
+            self._tensors.sort(key=lambda t: (-t.rank, natural_sort_key(t.full_name)))
 
         self._refresh_table()
 
@@ -585,8 +630,7 @@ class SftApp(App):
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
-        Binding("tab", "focus_next", "Switch Panel", show=True),
-        Binding("shift+tab", "focus_previous", "Switch Panel", show=False),
+        Binding("tab", "toggle_panel", "Switch Panel", show=True),
         Binding("slash", "start_search", "Search", show=True),
         Binding("escape", "cancel_search", "Cancel", show=False),
         Binding("s", "cycle_sort", "Sort", show=True),
@@ -669,6 +713,16 @@ class SftApp(App):
         # Update status bar
         status = self.query_one(StatusBar)
         status.set_prefix(event.prefix)
+
+    def action_toggle_panel(self) -> None:
+        """Toggle focus between tree and table panels."""
+        tree = self.query_one(HierarchyTree)
+        table = self.query_one(TensorTable)
+
+        if tree.has_focus:
+            table.focus()
+        else:
+            tree.focus()
 
     def action_start_search(self) -> None:
         """Start search mode."""

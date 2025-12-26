@@ -2,9 +2,20 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+
+def natural_sort_key(s: str) -> list:
+    """Generate a sort key for natural (human) sorting.
+
+    Splits string into text and numeric parts so that numbers are
+    compared numerically: 'layer.2' < 'layer.10' instead of 'layer.10' < 'layer.2'.
+    """
+    parts = re.split(r"(\d+)", s)
+    return [int(part) if part.isdigit() else part.lower() for part in parts]
 
 
 @dataclass
@@ -84,8 +95,8 @@ class TensorIndex:
                 )
             )
 
-        # Sort tensors by name for consistent ordering
-        tensors.sort(key=lambda t: t.full_name)
+        # Sort tensors by name for consistent ordering (natural sort)
+        tensors.sort(key=lambda t: natural_sort_key(t.full_name))
 
         return cls(tensors=tensors, metadata=metadata, file_path=path)
 

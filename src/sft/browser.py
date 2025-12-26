@@ -479,14 +479,20 @@ class HierarchyTree(Tree):
         )
         self._node_prefixes[self.root] = ""
 
-    def apply_filter(self, matching_tensors: list[TensorInfo] | None) -> None:
+    def apply_filter(
+        self, matching_tensors: list[TensorInfo] | None, query: str = ""
+    ) -> None:
         """Apply a filter to the tree, showing only matching tensors."""
         if matching_tensors is None:
             # Clear filter
             self.filtered_tree = None
+            self.border_subtitle = ""
         else:
             # Create filtered tree
             self.filtered_tree = FilteredPrefixTree(self.prefix_tree, matching_tensors)
+            # Show search query in border subtitle
+            if query:
+                self.border_subtitle = f"search: {query}"
 
         self._rebuild_tree_view()
 
@@ -679,7 +685,8 @@ class SearchInput(Input):
     """
 
     def __init__(self) -> None:
-        super().__init__(placeholder="Search tensors... (ESC to cancel)")
+        super().__init__(placeholder="Type to search...")
+        self.border_title = "Search (ESC to cancel)"
 
 
 class SftApp(App):
@@ -850,8 +857,8 @@ class SftApp(App):
             # Filter tensors from the full index (not current selection)
             filtered = [t for t in self.index.tensors if query in t.full_name.lower()]
 
-            # Update tree with filter
-            tree.apply_filter(filtered)
+            # Update tree with filter (pass query for display)
+            tree.apply_filter(filtered, query)
 
             # Update table with filtered tensors
             self._current_prefix = ""

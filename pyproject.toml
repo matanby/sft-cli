@@ -1,6 +1,6 @@
 [project]
 name = "sft-cli"
-version = "0.1.0"
+dynamic = ["version"]
 description = "An interactive terminal browser for .safetensors files"
 readme = "README.md"
 license = { text = "MIT" }
@@ -38,6 +38,9 @@ Repository = "https://github.com/matanby/sft-cli"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/sft/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sft"]

@@ -1,29 +1,31 @@
 # sft
 
-An interactive terminal browser for `.safetensors` files.
+A fast, interactive terminal browser for `.safetensors` files.
 
-## Installation
+<p align="center">
+  <img src="https://vhs.charm.sh/vhs-6eQ3Cv0oexkfUshZ7PmO3b.gif" alt="sft demo">
+</p>
 
-The recommended way to install `sft` is via [uv](https://docs.astral.sh/uv/):
+## Why?
+
+If you work with ML models, you've probably found yourself wondering "what's actually in this .safetensors file?" — the layer names, shapes, dtypes, sizes. Maybe you want to check if a model has the layers you expect, compare two checkpoints, or just explore an unfamiliar architecture.
+
+`sft` lets you do that instantly from your terminal. No Python scripts, no notebooks, no waiting for tensors to load into memory. It reads only the file header, so even multi-gigabyte models open in milliseconds.
+
+## ⚡ Installation
+
+The recommended way to install is via [uv](https://docs.astral.sh/uv/):
 
 ```bash
 uv tool install sft-cli
 ```
 
-This makes `sft` available globally as a command-line tool.
+This makes `sft` available globally as a command.
 
-Alternatively, install via pip:
+Or install with pip:
 
 ```bash
 pip install sft-cli
-```
-
-Or install from source:
-
-```bash
-git clone https://github.com/matanby/sft-cli
-cd sft-cli
-pip install -e .
 ```
 
 ## Usage
@@ -32,57 +34,31 @@ pip install -e .
 sft model.safetensors
 ```
 
-## Features
+That's it. Navigate with arrow keys, search with `/`, quit with `q`.
 
-- **Interactive TUI** — Browse tensors with keyboard navigation
-- **Hierarchy View** — Tensors organized by namespace (e.g., `unet.down_blocks.0`)
-- **Fast** — Header-only parsing, instant startup even for multi-GB files
-- **Safe** — Read-only, never loads tensor data
-- **Search** — Find tensors by name with `/`
-- **Filter** — Filter by dtype with `f`
-- **Sort** — Sort by name, size, or rank with `s`
-- **Details** — View tensor details with `Space`
-- **Metadata** — View file metadata with `m`
+## ✨ Features
 
-## Keybindings
+- **Hierarchical browser** — Tensors grouped by namespace (e.g., `model.layers.0.attention`)
+- **Instant startup** — Header-only parsing, works on multi-GB files
+- **Search** — Filter tensors by name with `/`
+- **Sort** — By name, size, or rank with `s`
+- **Inspect** — View full tensor details with `Space`
+- **Metadata** — See embedded file metadata with `m`
+- **Read-only** — Never touches your model files
 
-### Navigation
+## ⌨️ Keybindings
+
 | Key | Action |
 |-----|--------|
-| `↑`/`↓` | Move selection |
-| `←`/`→` | Collapse/Expand tree node |
-| `Enter` | Select/focus node |
-| `Tab` | Switch between tree and table |
-| `g`/`G` | Go to top/bottom |
-
-### Search & Filter
-| Key | Action |
-|-----|--------|
-| `/` | Start search |
-| `f` | Open filter palette |
-| `Esc` | Cancel search/close dialogs |
-
-### Sorting
-| Key | Action |
-|-----|--------|
-| `s` | Cycle sort mode (name ↑↓, size ↑↓, rank ↑↓) |
-
-### Inspection
-| Key | Action |
-|-----|--------|
-| `Space` | Show tensor details |
-| `m` | Show file metadata |
-
-### Application
-| Key | Action |
-|-----|--------|
+| `↑`/`↓` | Navigate |
+| `←`/`→` | Collapse/expand tree |
+| `Tab` | Switch panels |
+| `/` | Search |
+| `s` | Cycle sort mode |
+| `Space` | Tensor details |
+| `m` | File metadata |
+| `f` | Filter by dtype |
 | `q` | Quit |
-
-## Technical Details
-
-- **Header-only parsing** — sft reads only the safetensors header, never loading tensor data
-- **Instant startup** — Even multi-GB model files open instantly
-- **Memory efficient** — Uses minimal memory regardless of file size
 
 ## License
 

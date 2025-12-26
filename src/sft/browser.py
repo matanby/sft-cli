@@ -450,13 +450,28 @@ class TensorTable(DataTable):
         self.zebra_stripes = True
         self._tensors: list[TensorInfo] = []
         self._current_prefix: str = ""
+        self._sort_mode: SortMode | None = None
+        self._columns_initialized: bool = False
 
     def on_mount(self) -> None:
         """Set up table columns."""
+        self._setup_columns()
+
+    def _setup_columns(self) -> None:
+        """Set up table columns (only once)."""
+        if self._columns_initialized:
+            return
         self.add_column("Name", key="name")
         self.add_column("Shape", key="shape")
         self.add_column("Dtype", key="dtype")
         self.add_column("Size", key="size")
+        self._columns_initialized = True
+
+    def _get_sort_indicator(self) -> str:
+        """Get a string indicating the current sort mode."""
+        if self._sort_mode is None:
+            return ""
+        return f" [{self._sort_mode.value}]"
 
     def update_tensors(self, tensors: list[TensorInfo], prefix: str = "") -> None:
         """Update the table with a list of tensors."""
@@ -469,6 +484,7 @@ class TensorTable(DataTable):
         self.clear()
 
         for tensor in self._tensors:
+            # Add sort indicator to the first row's name if sorting is active
             self.add_row(
                 tensor.full_name,
                 format_shape(tensor.shape),
@@ -476,6 +492,12 @@ class TensorTable(DataTable):
                 format_bytes(tensor.nbytes),
                 key=tensor.full_name,
             )
+
+        # Update border subtitle to show sort mode
+        if self._sort_mode:
+            self.border_subtitle = f"sort: {self._sort_mode.value}"
+        else:
+            self.border_subtitle = ""
 
     def get_selected_tensor(self) -> TensorInfo | None:
         """Get the currently selected tensor."""
@@ -485,6 +507,8 @@ class TensorTable(DataTable):
 
     def sort_by(self, mode: SortMode) -> None:
         """Sort tensors by the given mode."""
+        self._sort_mode = mode
+
         if mode == SortMode.NAME_ASC:
             self._tensors.sort(key=lambda t: natural_sort_key(t.full_name))
         elif mode == SortMode.NAME_DESC:
@@ -506,69 +530,6 @@ class TensorTable(DataTable):
         """Filter tensors by search query."""
         # This is called from the app with the full tensor list
         pass
-
-
-class StatusBar(Static):
-    """Status bar showing file info and current state."""
-
-    def __init__(self, index: TensorIndex) -> None:
-        super().__init__()
-        self.index = index
-        self.current_prefix = ""
-        self.sort_mode: SortMode | None = None
-        self.search_query: str = ""
-        self.filtered_count: int | None = None
-
-    def on_mount(self) -> None:
-        """Set initial status."""
-        self._update_status()
-
-    def set_prefix(self, prefix: str) -> None:
-        """Update the current prefix."""
-        self.current_prefix = prefix
-        self._update_status()
-
-    def set_sort_mode(self, mode: SortMode) -> None:
-        """Update the sort mode display."""
-        self.sort_mode = mode
-        self._update_status()
-
-    def set_search(self, query: str, count: int | None = None) -> None:
-        """Update the search query display."""
-        self.search_query = query
-        self.filtered_count = count
-        self._update_status()
-
-    def _update_status(self) -> None:
-        """Update the status bar content."""
-        text = Text()
-        text.append(f" {self.index.file_path.name}", style="bold cyan")
-        text.append("  │  ", style="dim")
-
-        if self.filtered_count is not None:
-            text.append(
-                f"{self.filtered_count}/{self.index.total_tensors} tensors",
-                style="green",
-            )
-        else:
-            text.append(f"{self.index.total_tensors} tensors", style="green")
-
-        text.append("  │  ", style="dim")
-        text.append(f"{format_bytes(self.index.total_bytes)}", style="yellow")
-
-        if self.current_prefix:
-            text.append("  │  ", style="dim")
-            text.append(f"/{self.current_prefix}", style="magenta")
-
-        if self.sort_mode:
-            text.append("  │  ", style="dim")
-            text.append(f"sort: {self.sort_mode.value}", style="blue")
-
-        if self.search_query:
-            text.append("  │  ", style="dim")
-            text.append(f"search: {self.search_query}", style="italic")
-
-        self.update(text)
 
 
 class SearchInput(Input):
@@ -599,9 +560,8 @@ class SftApp(App):
     CSS = """
     Screen {
         layout: grid;
-        grid-size: 2 2;
+        grid-size: 2 1;
         grid-columns: 1fr 2fr;
-        grid-rows: 1fr auto;
     }
 
     HierarchyTree {
@@ -613,13 +573,6 @@ class SftApp(App):
     TensorTable {
         height: 100%;
         border: solid $secondary;
-    }
-
-    StatusBar {
-        column-span: 2;
-        height: 1;
-        background: $surface;
-        padding: 0 1;
     }
 
     SearchInput {
@@ -670,7 +623,6 @@ class SftApp(App):
 
         yield HierarchyTree(self.prefix_tree)
         yield TensorTable()
-        yield StatusBar(self.index)
         yield SearchInput()
 
     def on_mount(self) -> None:
@@ -710,10 +662,6 @@ class SftApp(App):
             if self._sort_mode_index > 0:
                 table.sort_by(SORT_ORDER[self._sort_mode_index])
 
-        # Update status bar
-        status = self.query_one(StatusBar)
-        status.set_prefix(event.prefix)
-
     def action_toggle_panel(self) -> None:
         """Toggle focus between tree and table panels."""
         tree = self.query_one(HierarchyTree)
@@ -746,10 +694,6 @@ class SftApp(App):
         if self._sort_mode_index > 0:
             table.sort_by(SORT_ORDER[self._sort_mode_index])
 
-        # Update status
-        status = self.query_one(StatusBar)
-        status.set_search("", None)
-
         # Focus table
         table.focus()
 
@@ -768,14 +712,8 @@ class SftApp(App):
             # Apply current sort
             if self._sort_mode_index > 0:
                 table.sort_by(SORT_ORDER[self._sort_mode_index])
-
-            # Update status
-            status = self.query_one(StatusBar)
-            status.set_search(query, len(filtered))
         else:
             table.update_tensors(self._all_tensors, self._current_prefix)
-            status = self.query_one(StatusBar)
-            status.set_search("", None)
 
     def on_input_submitted(self, _event: Input.Submitted) -> None:
         """Handle search input submission."""
@@ -790,9 +728,6 @@ class SftApp(App):
 
         table = self.query_one(TensorTable)
         table.sort_by(mode)
-
-        status = self.query_one(StatusBar)
-        status.set_sort_mode(mode)
 
     def action_show_details(self) -> None:
         """Show tensor details popup."""
@@ -844,13 +779,6 @@ class SftApp(App):
         # Apply current sort
         if self._sort_mode_index > 0:
             table.sort_by(SORT_ORDER[self._sort_mode_index])
-
-        # Update status
-        status = self.query_one(StatusBar)
-        if len(tensors) != len(self._base_tensors):
-            status.set_search("", len(tensors))
-        else:
-            status.set_search("", None)
 
     def action_goto_top(self) -> None:
         """Go to top of current focused widget."""

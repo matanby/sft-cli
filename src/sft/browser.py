@@ -327,6 +327,94 @@ class FilterScreen(ModalScreen):
         self.dismiss(filters)
 
 
+class FilteredPrefixTree:
+    """A filtered view of a PrefixTree containing only matching tensors."""
+
+    def __init__(
+        self, original_tree: PrefixTree, matching_tensors: list[TensorInfo]
+    ) -> None:
+        """Build a filtered tree from matching tensors."""
+        self.original_tree = original_tree
+        self.index = original_tree.index
+        self.delimiter = original_tree.delimiter
+        self.matching_tensor_names = {t.full_name for t in matching_tensors}
+
+        # Build filtered tree structure
+        self.root = self._build_filtered_node(original_tree.root, "")
+
+    def _build_filtered_node(
+        self, original_node: PrefixTreeNode, prefix: str
+    ) -> PrefixTreeNode | None:
+        """Recursively build a filtered node, returning None if no matches."""
+        # Check direct tensors
+        matching_direct = [
+            tid
+            for tid in original_node.tensor_ids
+            if self.index.tensors[tid].full_name in self.matching_tensor_names
+        ]
+
+        # Recursively filter children
+        filtered_children: dict[str, PrefixTreeNode] = {}
+        for child_name, child_node in original_node.children.items():
+            child_prefix = f"{prefix}.{child_name}" if prefix else child_name
+            filtered_child = self._build_filtered_node(child_node, child_prefix)
+            if filtered_child is not None:
+                filtered_children[child_name] = filtered_child
+
+        # If no matches in this subtree, return None
+        if not matching_direct and not filtered_children:
+            return None
+
+        # Create filtered node
+        node = PrefixTreeNode(name=original_node.name)
+        node.tensor_ids = matching_direct
+        node.children = filtered_children
+
+        # Compute aggregates
+        direct_count = len(matching_direct)
+        direct_bytes = sum(self.index.tensors[tid].nbytes for tid in matching_direct)
+        child_count = sum(c.aggregate_count for c in filtered_children.values())
+        child_bytes = sum(c.aggregate_bytes for c in filtered_children.values())
+
+        node.aggregate_count = direct_count + child_count
+        node.aggregate_bytes = direct_bytes + child_bytes
+
+        return node
+
+    def get_tensors_under(self, prefix: str) -> list[TensorInfo]:
+        """Get all matching tensors under a given prefix."""
+        if self.root is None:
+            return []
+
+        if not prefix:
+            return [
+                t
+                for t in self.index.tensors
+                if t.full_name in self.matching_tensor_names
+            ]
+
+        # Navigate to the prefix node
+        parts = prefix.split(self.delimiter)
+        node = self.root
+
+        for part in parts:
+            if part in node.children:
+                node = node.children[part]
+            else:
+                return []
+
+        # Collect all tensor IDs under this node
+        tensor_ids = self._collect_tensor_ids(node)
+        return [self.index.tensors[tid] for tid in tensor_ids]
+
+    def _collect_tensor_ids(self, node: PrefixTreeNode) -> list[int]:
+        """Recursively collect all tensor IDs under a node."""
+        ids = list(node.tensor_ids)
+        for child in node.children.values():
+            ids.extend(self._collect_tensor_ids(child))
+        return ids
+
+
 class HierarchyTree(Tree):
     """Tree widget for navigating tensor namespaces."""
 
@@ -347,23 +435,60 @@ class HierarchyTree(Tree):
     def __init__(self, prefix_tree: PrefixTree) -> None:
         super().__init__("root")
         self.prefix_tree = prefix_tree
+        self.filtered_tree: FilteredPrefixTree | None = None
         self._node_prefixes: dict[TreeNode, str] = {}
+
+    @property
+    def active_tree(self) -> PrefixTree | FilteredPrefixTree:
+        """Return the currently active tree (filtered or original)."""
+        return self.filtered_tree if self.filtered_tree else self.prefix_tree
 
     def on_mount(self) -> None:
         """Build the tree when mounted."""
+        self._rebuild_tree_view()
+
+    def _rebuild_tree_view(self) -> None:
+        """Rebuild the tree view from the active tree."""
+        # Clear existing tree
+        self.root.remove_children()
+        self._node_prefixes.clear()
+
+        active = self.active_tree
+        if active.root is None:
+            # No matches - show empty state
+            self.root.set_label(
+                self._make_label(
+                    self.prefix_tree.index.file_path.name + " (no matches)",
+                    0,
+                    0,
+                )
+            )
+            self._node_prefixes[self.root] = ""
+            return
+
         self.root.expand()
-        self._build_tree(self.root, self.prefix_tree.root, "")
+        self._build_tree(self.root, active.root, "")
 
         # Update root label
-        root_node = self.prefix_tree.root
         self.root.set_label(
             self._make_label(
                 self.prefix_tree.index.file_path.name,
-                root_node.aggregate_count,
-                root_node.aggregate_bytes,
+                active.root.aggregate_count,
+                active.root.aggregate_bytes,
             )
         )
         self._node_prefixes[self.root] = ""
+
+    def apply_filter(self, matching_tensors: list[TensorInfo] | None) -> None:
+        """Apply a filter to the tree, showing only matching tensors."""
+        if matching_tensors is None:
+            # Clear filter
+            self.filtered_tree = None
+        else:
+            # Create filtered tree
+            self.filtered_tree = FilteredPrefixTree(self.prefix_tree, matching_tensors)
+
+        self._rebuild_tree_view()
 
     def _make_label(self, name: str, count: int, nbytes: int) -> Text:
         """Create a formatted label for a tree node."""
@@ -406,10 +531,15 @@ class HierarchyTree(Tree):
         """Get the prefix and PrefixTreeNode for a given tree node."""
         prefix = self._node_prefixes.get(tree_node, "")
 
-        # Navigate to find the actual PrefixTreeNode
-        node = self.prefix_tree.root
+        # Navigate to find the actual PrefixTreeNode in the active tree
+        active = self.active_tree
+        node = active.root
+        if node is None:
+            # Return a dummy empty node
+            return prefix, PrefixTreeNode(name="")
+
         if prefix:
-            for part in prefix.split(self.prefix_tree.delimiter):
+            for part in prefix.split(active.delimiter):
                 if part in node.children:
                     node = node.children[part]
                 else:
@@ -644,11 +774,12 @@ class SftApp(App):
         """Handle tree node selection."""
         self._current_prefix = event.prefix
 
-        # Get tensors under this prefix
-        tensors = self.prefix_tree.get_tensors_under(event.prefix)
+        # Get tensors under this prefix from the active tree
+        tree = self.query_one(HierarchyTree)
+        tensors = tree.active_tree.get_tensors_under(event.prefix)
         self._base_tensors = tensors.copy()
 
-        # Apply any active filters
+        # Apply any active dtype filters
         if self._current_filters:
             self._apply_filters()
         else:
@@ -686,6 +817,15 @@ class SftApp(App):
         search_input.value = ""
         self._search_active = False
 
+        # Clear tree filter
+        tree = self.query_one(HierarchyTree)
+        tree.apply_filter(None)
+
+        # Reset to show all tensors
+        self._current_prefix = ""
+        self._base_tensors = self.index.tensors.copy()
+        self._all_tensors = self.index.tensors.copy()
+
         # Restore full tensor list
         table = self.query_one(TensorTable)
         table.update_tensors(self._all_tensors, self._current_prefix)
@@ -694,8 +834,8 @@ class SftApp(App):
         if self._sort_mode_index > 0:
             table.sort_by(SORT_ORDER[self._sort_mode_index])
 
-        # Focus table
-        table.focus()
+        # Focus tree
+        tree.focus()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         """Handle search input changes."""
@@ -703,17 +843,32 @@ class SftApp(App):
             return
 
         query = event.value.lower()
+        tree = self.query_one(HierarchyTree)
         table = self.query_one(TensorTable)
 
         if query:
-            filtered = [t for t in self._all_tensors if query in t.full_name.lower()]
-            table.update_tensors(filtered, self._current_prefix)
+            # Filter tensors from the full index (not current selection)
+            filtered = [t for t in self.index.tensors if query in t.full_name.lower()]
+
+            # Update tree with filter
+            tree.apply_filter(filtered)
+
+            # Update table with filtered tensors
+            self._current_prefix = ""
+            self._base_tensors = filtered
+            self._all_tensors = filtered
+            table.update_tensors(filtered, "")
 
             # Apply current sort
             if self._sort_mode_index > 0:
                 table.sort_by(SORT_ORDER[self._sort_mode_index])
         else:
-            table.update_tensors(self._all_tensors, self._current_prefix)
+            # Clear filter
+            tree.apply_filter(None)
+            self._current_prefix = ""
+            self._base_tensors = self.index.tensors.copy()
+            self._all_tensors = self.index.tensors.copy()
+            table.update_tensors(self.index.tensors, "")
 
     def on_input_submitted(self, _event: Input.Submitted) -> None:
         """Handle search input submission."""

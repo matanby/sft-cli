@@ -1,0 +1,23 @@
+# AI agent documents
+.ai/
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Testing
+.pytest_cache/
+.coverage
+
+# Test files
+*.safetensors

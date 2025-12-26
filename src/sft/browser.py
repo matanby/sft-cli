@@ -1,0 +1,813 @@
+"""Textual TUI application for browsing safetensors files."""
+
+from __future__ import annotations
+
+import json
+from enum import Enum
+from pathlib import Path
+
+from rich.text import Text
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Container
+from textual.message import Message
+from textual.screen import ModalScreen
+from textual.widgets import DataTable, Footer, Input, Label, Static, Tree
+from textual.widgets.tree import TreeNode
+
+from sft.index import PrefixTree, PrefixTreeNode, TensorIndex, TensorInfo
+
+
+def format_bytes(nbytes: int) -> str:
+    """Format bytes as human-readable string."""
+    if nbytes < 1024:
+        return f"{nbytes} B"
+    elif nbytes < 1024 * 1024:
+        return f"{nbytes / 1024:.1f} KB"
+    elif nbytes < 1024 * 1024 * 1024:
+        return f"{nbytes / 1024 / 1024:.1f} MB"
+    else:
+        return f"{nbytes / 1024 / 1024 / 1024:.2f} GB"
+
+
+def format_shape(shape: tuple[int, ...]) -> str:
+    """Format tensor shape as string."""
+    if len(shape) == 0:
+        return "()"
+    return f"({', '.join(str(d) for d in shape)})"
+
+
+class SortMode(Enum):
+    """Sort modes for tensor table."""
+
+    NAME_ASC = "name ↑"
+    NAME_DESC = "name ↓"
+    SIZE_ASC = "size ↑"
+    SIZE_DESC = "size ↓"
+    RANK_ASC = "rank ↑"
+    RANK_DESC = "rank ↓"
+
+
+SORT_ORDER = [
+    SortMode.NAME_ASC,
+    SortMode.NAME_DESC,
+    SortMode.SIZE_DESC,
+    SortMode.SIZE_ASC,
+    SortMode.RANK_DESC,
+    SortMode.RANK_ASC,
+]
+
+
+class TensorDetailScreen(ModalScreen):
+    """Modal screen showing tensor details."""
+
+    CSS = """
+    TensorDetailScreen {
+        align: center middle;
+    }
+
+    #detail-container {
+        width: 60;
+        height: auto;
+        max-height: 80%;
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+    }
+
+    #detail-title {
+        text-align: center;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    .detail-row {
+        margin: 0;
+    }
+
+    .detail-label {
+        color: $text-muted;
+    }
+
+    .detail-value {
+        color: $text;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+        Binding("space", "dismiss", "Close"),
+    ]
+
+    def __init__(self, tensor: TensorInfo) -> None:
+        super().__init__()
+        self.tensor = tensor
+
+    def compose(self) -> ComposeResult:
+        t = self.tensor
+        with Container(id="detail-container"):
+            yield Label("Tensor Details", id="detail-title")
+            yield Static(f"[dim]Name:[/dim]  {t.full_name}", classes="detail-row")
+            yield Static(
+                f"[dim]Shape:[/dim] {format_shape(t.shape)}", classes="detail-row"
+            )
+            yield Static(f"[dim]Rank:[/dim]  {t.rank}", classes="detail-row")
+            yield Static(f"[dim]Dtype:[/dim] {t.dtype}", classes="detail-row")
+            yield Static(
+                f"[dim]Size:[/dim]  {format_bytes(t.nbytes)} ({t.nbytes:,} bytes)",
+                classes="detail-row",
+            )
+            yield Static(f"[dim]Numel:[/dim] {t.numel:,}", classes="detail-row")
+            yield Static(
+                "\n[dim]Press ESC or SPACE to close[/dim]", classes="detail-row"
+            )
+
+
+class MetadataScreen(ModalScreen):
+    """Modal screen showing file metadata."""
+
+    CSS = """
+    MetadataScreen {
+        align: center middle;
+    }
+
+    #metadata-container {
+        width: 70;
+        height: auto;
+        max-height: 80%;
+        background: $surface;
+        border: thick $secondary;
+        padding: 1 2;
+    }
+
+    #metadata-title {
+        text-align: center;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #metadata-content {
+        height: auto;
+        max-height: 20;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+        Binding("m", "dismiss", "Close"),
+    ]
+
+    def __init__(self, metadata: dict, file_path: Path) -> None:
+        super().__init__()
+        self.metadata = metadata
+        self.file_path = file_path
+
+    def compose(self) -> ComposeResult:
+        with Container(id="metadata-container"):
+            yield Label("File Metadata", id="metadata-title")
+            yield Static(f"[dim]File:[/dim] {self.file_path.name}")
+
+            if self.metadata:
+                formatted = json.dumps(self.metadata, indent=2)
+                yield Static(f"\n{formatted}", id="metadata-content")
+            else:
+                yield Static("\n[dim]No metadata found in file[/dim]")
+
+            yield Static("\n[dim]Press ESC or M to close[/dim]")
+
+
+class FilterScreen(ModalScreen):
+    """Modal screen for filtering tensors."""
+
+    CSS = """
+    FilterScreen {
+        align: center middle;
+    }
+
+    #filter-container {
+        width: 50;
+        height: auto;
+        max-height: 80%;
+        background: $surface;
+        border: thick $accent;
+        padding: 1 2;
+    }
+
+    #filter-title {
+        text-align: center;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    .filter-section {
+        margin: 1 0;
+    }
+
+    .filter-label {
+        color: $text-muted;
+        margin-bottom: 0;
+    }
+
+    .filter-options {
+        margin-left: 2;
+    }
+
+    .dtype-option {
+        margin: 0;
+    }
+
+    .dtype-option.selected {
+        color: $success;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+        Binding("f", "dismiss", "Close"),
+        Binding("c", "clear_filters", "Clear All"),
+        Binding("1", "toggle_dtype_0", "Toggle", show=False),
+        Binding("2", "toggle_dtype_1", "Toggle", show=False),
+        Binding("3", "toggle_dtype_2", "Toggle", show=False),
+        Binding("4", "toggle_dtype_3", "Toggle", show=False),
+        Binding("5", "toggle_dtype_4", "Toggle", show=False),
+    ]
+
+    COMMON_DTYPES = ["F16", "F32", "BF16", "I8", "I32"]
+
+    def __init__(self, current_filters: dict, available_dtypes: set[str]) -> None:
+        super().__init__()
+        self.current_filters = current_filters.copy()
+        self.available_dtypes = sorted(available_dtypes)
+        self.selected_dtypes: set[str] = set(current_filters.get("dtypes", []))
+
+    def compose(self) -> ComposeResult:
+        with Container(id="filter-container"):
+            yield Label("Filter Tensors", id="filter-title")
+
+            # Dtype filter
+            yield Static("[bold]Dtype Filter[/bold]", classes="filter-section")
+            for i, dtype in enumerate(self.available_dtypes[:5]):
+                selected = "✓" if dtype in self.selected_dtypes else " "
+                css_class = (
+                    "dtype-option selected"
+                    if dtype in self.selected_dtypes
+                    else "dtype-option"
+                )
+                yield Static(
+                    f"  [{i + 1}] {selected} {dtype}",
+                    classes=css_class,
+                    id=f"dtype-{i}",
+                )
+
+            yield Static("\n[dim]Keys:[/dim]", classes="filter-section")
+            yield Static("  [1-5] Toggle dtype")
+            yield Static("  [c] Clear all filters")
+            yield Static("  [ESC/f] Close")
+
+    def _toggle_dtype(self, index: int) -> None:
+        """Toggle a dtype filter."""
+        if index >= len(self.available_dtypes):
+            return
+
+        dtype = self.available_dtypes[index]
+        if dtype in self.selected_dtypes:
+            self.selected_dtypes.discard(dtype)
+        else:
+            self.selected_dtypes.add(dtype)
+
+        # Update display
+        selected = "✓" if dtype in self.selected_dtypes else " "
+        widget = self.query_one(f"#dtype-{index}", Static)
+        widget.update(f"  [{index + 1}] {selected} {dtype}")
+        if dtype in self.selected_dtypes:
+            widget.add_class("selected")
+        else:
+            widget.remove_class("selected")
+
+    def action_toggle_dtype_0(self) -> None:
+        self._toggle_dtype(0)
+
+    def action_toggle_dtype_1(self) -> None:
+        self._toggle_dtype(1)
+
+    def action_toggle_dtype_2(self) -> None:
+        self._toggle_dtype(2)
+
+    def action_toggle_dtype_3(self) -> None:
+        self._toggle_dtype(3)
+
+    def action_toggle_dtype_4(self) -> None:
+        self._toggle_dtype(4)
+
+    def action_clear_filters(self) -> None:
+        """Clear all filters."""
+        self.selected_dtypes.clear()
+        for i in range(min(5, len(self.available_dtypes))):
+            widget = self.query_one(f"#dtype-{i}", Static)
+            dtype = self.available_dtypes[i]
+            widget.update(f"  [{i + 1}]   {dtype}")
+            widget.remove_class("selected")
+
+    def action_dismiss(self) -> None:
+        """Dismiss and return filters."""
+        filters = {}
+        if self.selected_dtypes:
+            filters["dtypes"] = list(self.selected_dtypes)
+        self.dismiss(filters)
+
+
+class HierarchyTree(Tree):
+    """Tree widget for navigating tensor namespaces."""
+
+    class NodeSelected(Message):
+        """Message sent when a tree node is selected."""
+
+        def __init__(self, prefix: str, node: PrefixTreeNode) -> None:
+            self.prefix = prefix
+            self.node = node
+            super().__init__()
+
+    def __init__(self, prefix_tree: PrefixTree) -> None:
+        super().__init__("root")
+        self.prefix_tree = prefix_tree
+        self._node_prefixes: dict[TreeNode, str] = {}
+
+    def on_mount(self) -> None:
+        """Build the tree when mounted."""
+        self.root.expand()
+        self._build_tree(self.root, self.prefix_tree.root, "")
+
+        # Update root label
+        root_node = self.prefix_tree.root
+        self.root.set_label(
+            self._make_label(
+                self.prefix_tree.index.file_path.name,
+                root_node.aggregate_count,
+                root_node.aggregate_bytes,
+            )
+        )
+        self._node_prefixes[self.root] = ""
+
+    def _make_label(self, name: str, count: int, nbytes: int) -> Text:
+        """Create a formatted label for a tree node."""
+        label = Text()
+        label.append(name, style="bold")
+        label.append(f"  ({count}, {format_bytes(nbytes)})", style="dim")
+        return label
+
+    def _build_tree(self, parent: TreeNode, node: PrefixTreeNode, prefix: str) -> None:
+        """Recursively build tree nodes."""
+        for child_name, child_node in sorted(node.children.items()):
+            child_prefix = f"{prefix}.{child_name}" if prefix else child_name
+
+            tree_node = parent.add(
+                self._make_label(
+                    child_name,
+                    child_node.aggregate_count,
+                    child_node.aggregate_bytes,
+                ),
+                expand=False,
+            )
+            self._node_prefixes[tree_node] = child_prefix
+
+            # Recursively add children
+            if child_node.children:
+                self._build_tree(tree_node, child_node, child_prefix)
+
+    def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
+        """Handle node selection."""
+        prefix = self._node_prefixes.get(event.node, "")
+
+        # Navigate to find the actual PrefixTreeNode
+        node = self.prefix_tree.root
+        if prefix:
+            for part in prefix.split(self.prefix_tree.delimiter):
+                if part in node.children:
+                    node = node.children[part]
+                else:
+                    break
+
+        self.post_message(self.NodeSelected(prefix, node))
+
+
+class TensorTable(DataTable):
+    """Table widget for displaying tensor information."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cursor_type = "row"
+        self.zebra_stripes = True
+        self._tensors: list[TensorInfo] = []
+        self._current_prefix: str = ""
+
+    def on_mount(self) -> None:
+        """Set up table columns."""
+        self.add_column("Name", key="name")
+        self.add_column("Shape", key="shape")
+        self.add_column("Dtype", key="dtype")
+        self.add_column("Size", key="size")
+
+    def update_tensors(self, tensors: list[TensorInfo], prefix: str = "") -> None:
+        """Update the table with a list of tensors."""
+        self._tensors = tensors
+        self._current_prefix = prefix
+        self._refresh_table()
+
+    def _refresh_table(self) -> None:
+        """Refresh the table contents."""
+        self.clear()
+
+        for tensor in self._tensors:
+            # Strip prefix from name for relative display
+            if self._current_prefix and tensor.full_name.startswith(
+                self._current_prefix + "."
+            ):
+                display_name = tensor.full_name[len(self._current_prefix) + 1 :]
+            else:
+                display_name = tensor.full_name
+
+            self.add_row(
+                display_name,
+                format_shape(tensor.shape),
+                tensor.dtype,
+                format_bytes(tensor.nbytes),
+                key=tensor.full_name,
+            )
+
+    def get_selected_tensor(self) -> TensorInfo | None:
+        """Get the currently selected tensor."""
+        if self.cursor_row is None or self.cursor_row >= len(self._tensors):
+            return None
+        return self._tensors[self.cursor_row]
+
+    def sort_by(self, mode: SortMode) -> None:
+        """Sort tensors by the given mode."""
+        if mode == SortMode.NAME_ASC:
+            self._tensors.sort(key=lambda t: t.full_name)
+        elif mode == SortMode.NAME_DESC:
+            self._tensors.sort(key=lambda t: t.full_name, reverse=True)
+        elif mode == SortMode.SIZE_ASC:
+            self._tensors.sort(key=lambda t: t.nbytes)
+        elif mode == SortMode.SIZE_DESC:
+            self._tensors.sort(key=lambda t: t.nbytes, reverse=True)
+        elif mode == SortMode.RANK_ASC:
+            self._tensors.sort(key=lambda t: (t.rank, t.full_name))
+        elif mode == SortMode.RANK_DESC:
+            self._tensors.sort(key=lambda t: (-t.rank, t.full_name))
+
+        self._refresh_table()
+
+    def filter_by_search(self, query: str) -> None:
+        """Filter tensors by search query."""
+        # This is called from the app with the full tensor list
+        pass
+
+
+class StatusBar(Static):
+    """Status bar showing file info and current state."""
+
+    def __init__(self, index: TensorIndex) -> None:
+        super().__init__()
+        self.index = index
+        self.current_prefix = ""
+        self.sort_mode: SortMode | None = None
+        self.search_query: str = ""
+        self.filtered_count: int | None = None
+
+    def on_mount(self) -> None:
+        """Set initial status."""
+        self._update_status()
+
+    def set_prefix(self, prefix: str) -> None:
+        """Update the current prefix."""
+        self.current_prefix = prefix
+        self._update_status()
+
+    def set_sort_mode(self, mode: SortMode) -> None:
+        """Update the sort mode display."""
+        self.sort_mode = mode
+        self._update_status()
+
+    def set_search(self, query: str, count: int | None = None) -> None:
+        """Update the search query display."""
+        self.search_query = query
+        self.filtered_count = count
+        self._update_status()
+
+    def _update_status(self) -> None:
+        """Update the status bar content."""
+        text = Text()
+        text.append(f" {self.index.file_path.name}", style="bold cyan")
+        text.append("  │  ", style="dim")
+
+        if self.filtered_count is not None:
+            text.append(
+                f"{self.filtered_count}/{self.index.total_tensors} tensors",
+                style="green",
+            )
+        else:
+            text.append(f"{self.index.total_tensors} tensors", style="green")
+
+        text.append("  │  ", style="dim")
+        text.append(f"{format_bytes(self.index.total_bytes)}", style="yellow")
+
+        if self.current_prefix:
+            text.append("  │  ", style="dim")
+            text.append(f"/{self.current_prefix}", style="magenta")
+
+        if self.sort_mode:
+            text.append("  │  ", style="dim")
+            text.append(f"sort: {self.sort_mode.value}", style="blue")
+
+        if self.search_query:
+            text.append("  │  ", style="dim")
+            text.append(f"search: {self.search_query}", style="italic")
+
+        self.update(text)
+
+
+class SearchInput(Input):
+    """Search input widget."""
+
+    DEFAULT_CSS = """
+    SearchInput {
+        display: none;
+        height: 3;
+        border: solid $accent;
+        background: $surface;
+    }
+
+    SearchInput.visible {
+        display: block;
+    }
+    """
+
+    def __init__(self) -> None:
+        super().__init__(placeholder="Search tensors... (ESC to cancel)")
+
+
+class SftApp(App):
+    """Interactive browser for .safetensors files."""
+
+    TITLE = "sft"
+
+    CSS = """
+    Screen {
+        layout: grid;
+        grid-size: 2 2;
+        grid-columns: 1fr 2fr;
+        grid-rows: 1fr auto;
+    }
+
+    HierarchyTree {
+        height: 100%;
+        border: solid $primary;
+        scrollbar-gutter: stable;
+    }
+
+    TensorTable {
+        height: 100%;
+        border: solid $secondary;
+    }
+
+    StatusBar {
+        column-span: 2;
+        height: 1;
+        background: $surface;
+        padding: 0 1;
+    }
+
+    SearchInput {
+        column-span: 2;
+        dock: bottom;
+    }
+    """
+
+    BINDINGS = [
+        Binding("q", "quit", "Quit"),
+        Binding("tab", "focus_next", "Switch Panel", show=True),
+        Binding("shift+tab", "focus_previous", "Switch Panel", show=False),
+        Binding("slash", "start_search", "Search", show=True),
+        Binding("escape", "cancel_search", "Cancel", show=False),
+        Binding("s", "cycle_sort", "Sort", show=True),
+        Binding("f", "show_filters", "Filter", show=True),
+        Binding("space", "show_details", "Details", show=True),
+        Binding("m", "show_metadata", "Metadata", show=True),
+        Binding("g", "goto_top", "Top", show=False),
+        Binding("G", "goto_bottom", "Bottom", show=False),
+    ]
+
+    def __init__(self, file_path: Path) -> None:
+        """Initialize the app with a safetensors file path."""
+        super().__init__()
+        self.file_path = file_path
+        self.index: TensorIndex | None = None
+        self.prefix_tree: PrefixTree | None = None
+        self._current_prefix: str = ""
+        self._all_tensors: list[TensorInfo] = []
+        self._base_tensors: list[TensorInfo] = []  # Before any filtering
+        self._sort_mode_index: int = 0
+        self._search_active: bool = False
+        self._current_filters: dict = {}
+
+    def compose(self) -> ComposeResult:
+        """Compose the UI layout."""
+        yield Footer()
+
+        # Parse the file
+        try:
+            self.index = TensorIndex.from_file(self.file_path)
+            self.prefix_tree = PrefixTree(self.index)
+            self._all_tensors = self.index.tensors.copy()
+            self._base_tensors = self.index.tensors.copy()
+        except Exception as e:
+            yield Static(f"Error loading file: {e}", id="error")
+            return
+
+        yield HierarchyTree(self.prefix_tree)
+        yield TensorTable()
+        yield StatusBar(self.index)
+        yield SearchInput()
+
+    def on_mount(self) -> None:
+        """Initialize the view after mounting."""
+        if self.index is None:
+            return
+
+        # Show all tensors initially
+        table = self.query_one(TensorTable)
+        table.update_tensors(self.index.tensors)
+
+        # Focus the tree
+        tree = self.query_one(HierarchyTree)
+        tree.focus()
+
+    def on_hierarchy_tree_node_selected(
+        self, event: HierarchyTree.NodeSelected
+    ) -> None:
+        """Handle tree node selection."""
+        self._current_prefix = event.prefix
+
+        # Get tensors under this prefix
+        tensors = self.prefix_tree.get_tensors_under(event.prefix)
+        self._base_tensors = tensors.copy()
+
+        # Apply any active filters
+        if self._current_filters:
+            self._apply_filters()
+        else:
+            self._all_tensors = tensors.copy()
+
+            # Update tensor table
+            table = self.query_one(TensorTable)
+            table.update_tensors(tensors, event.prefix)
+
+            # Apply current sort
+            if self._sort_mode_index > 0:
+                table.sort_by(SORT_ORDER[self._sort_mode_index])
+
+        # Update status bar
+        status = self.query_one(StatusBar)
+        status.set_prefix(event.prefix)
+
+    def action_start_search(self) -> None:
+        """Start search mode."""
+        search_input = self.query_one(SearchInput)
+        search_input.add_class("visible")
+        search_input.focus()
+        self._search_active = True
+
+    def action_cancel_search(self) -> None:
+        """Cancel search and restore full list."""
+        search_input = self.query_one(SearchInput)
+        search_input.remove_class("visible")
+        search_input.value = ""
+        self._search_active = False
+
+        # Restore full tensor list
+        table = self.query_one(TensorTable)
+        table.update_tensors(self._all_tensors, self._current_prefix)
+
+        # Apply current sort
+        if self._sort_mode_index > 0:
+            table.sort_by(SORT_ORDER[self._sort_mode_index])
+
+        # Update status
+        status = self.query_one(StatusBar)
+        status.set_search("", None)
+
+        # Focus table
+        table.focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """Handle search input changes."""
+        if not self._search_active:
+            return
+
+        query = event.value.lower()
+        table = self.query_one(TensorTable)
+
+        if query:
+            filtered = [t for t in self._all_tensors if query in t.full_name.lower()]
+            table.update_tensors(filtered, self._current_prefix)
+
+            # Apply current sort
+            if self._sort_mode_index > 0:
+                table.sort_by(SORT_ORDER[self._sort_mode_index])
+
+            # Update status
+            status = self.query_one(StatusBar)
+            status.set_search(query, len(filtered))
+        else:
+            table.update_tensors(self._all_tensors, self._current_prefix)
+            status = self.query_one(StatusBar)
+            status.set_search("", None)
+
+    def on_input_submitted(self, _event: Input.Submitted) -> None:
+        """Handle search input submission."""
+        # Keep the search active, just focus the table
+        table = self.query_one(TensorTable)
+        table.focus()
+
+    def action_cycle_sort(self) -> None:
+        """Cycle through sort modes."""
+        self._sort_mode_index = (self._sort_mode_index + 1) % len(SORT_ORDER)
+        mode = SORT_ORDER[self._sort_mode_index]
+
+        table = self.query_one(TensorTable)
+        table.sort_by(mode)
+
+        status = self.query_one(StatusBar)
+        status.set_sort_mode(mode)
+
+    def action_show_details(self) -> None:
+        """Show tensor details popup."""
+        table = self.query_one(TensorTable)
+        tensor = table.get_selected_tensor()
+
+        if tensor:
+            self.push_screen(TensorDetailScreen(tensor))
+
+    def action_show_metadata(self) -> None:
+        """Show file metadata popup."""
+        if self.index:
+            self.push_screen(MetadataScreen(self.index.metadata, self.file_path))
+
+    def action_show_filters(self) -> None:
+        """Show filter palette."""
+        if self.index is None:
+            return
+
+        # Get available dtypes
+        available_dtypes = {t.dtype for t in self.index.tensors}
+
+        def on_filter_result(filters: dict) -> None:
+            """Handle filter result."""
+            self._current_filters = filters
+            self._apply_filters()
+
+        self.push_screen(
+            FilterScreen(self._current_filters, available_dtypes),
+            on_filter_result,
+        )
+
+    def _apply_filters(self) -> None:
+        """Apply current filters to the tensor list."""
+        # Start from base tensors (all tensors under current prefix)
+        tensors = self._base_tensors.copy()
+
+        # Apply dtype filter
+        if "dtypes" in self._current_filters and self._current_filters["dtypes"]:
+            allowed = set(self._current_filters["dtypes"])
+            tensors = [t for t in tensors if t.dtype in allowed]
+
+        self._all_tensors = tensors
+
+        # Update table
+        table = self.query_one(TensorTable)
+        table.update_tensors(tensors, self._current_prefix)
+
+        # Apply current sort
+        if self._sort_mode_index > 0:
+            table.sort_by(SORT_ORDER[self._sort_mode_index])
+
+        # Update status
+        status = self.query_one(StatusBar)
+        if len(tensors) != len(self._base_tensors):
+            status.set_search("", len(tensors))
+        else:
+            status.set_search("", None)
+
+    def action_goto_top(self) -> None:
+        """Go to top of current focused widget."""
+        focused = self.focused
+        if isinstance(focused, DataTable):
+            focused.move_cursor(row=0)
+        elif isinstance(focused, Tree):
+            focused.select_node(focused.root)
+
+    def action_goto_bottom(self) -> None:
+        """Go to bottom of current focused widget."""
+        focused = self.focused
+        if isinstance(focused, DataTable):
+            focused.move_cursor(row=focused.row_count - 1)

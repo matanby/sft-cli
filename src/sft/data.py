@@ -1,7 +1,9 @@
-"""On-demand tensor loading and SVD computation for LoRA analysis."""
+"""On-demand tensor loading, SVD computation, and safetensors I/O for LoRA analysis."""
 
 from __future__ import annotations
 
+import json
+import struct
 from pathlib import Path
 
 import numpy as np
@@ -68,7 +70,7 @@ def compute_lora_svd(
 ):
     """Compute SVD of the effective LoRA matrix (B @ A).
 
-    Returns normalized singular values as a numpy array.
+    Returns (normalized_sv, sigma0) where sigma0 is the raw first singular value.
     """
 
     # Find tensor info for A and B
@@ -93,38 +95,32 @@ def compute_lora_svd(
     # B@A is (out, in) which can be huge, but has rank ≤ pair.rank.
     # SVD of the full matrix is O(out * in * min(out,in)) — very slow.
     # Instead, QR-factor both thin matrices and SVD their small (rank, rank) product.
-    # σ(B @ A) = σ(Rb @ Qb^T @ Qa @ Ra) = σ(Rb @ M @ Ra) where M = Qb^T @ Qa is (rank, rank).
+    # B = Qb @ Rb, A = Ra.T @ Qa.T  →  B@A = Qb @ (Rb @ Ra.T) @ Qa.T
+    # σ(B@A) = σ(Rb @ Ra.T) since Qb, Qa are orthonormal.
     a = a.astype(np.float32)
     b = b.astype(np.float32)
 
-    try:
-        if b.shape[1] == a.shape[0]:
-            # B (out, rank), A (rank, in)
-            qa, ra = np.linalg.qr(a.T, mode="reduced")  # qa (in, rank), ra (rank, rank)
-            qb, rb = np.linalg.qr(
-                b.T, mode="reduced"
-            )  # qb (out, rank), rb (rank, rank)
-            mid = rb.T @ (qb.T @ qa) @ ra  # (rank, rank)
-        elif a.shape[1] == b.shape[0]:
-            # A (out, rank), B (rank, in) — swapped convention
-            qa, ra = np.linalg.qr(a, mode="reduced")
-            qb, rb = np.linalg.qr(b, mode="reduced")
-            mid = ra @ (qa.T @ qb) @ rb.T
-        else:
-            # Fallback: try B @ A^T
-            qa, ra = np.linalg.qr(a, mode="reduced")
-            qb, rb = np.linalg.qr(b.T, mode="reduced")
-            mid = rb.T @ (qb.T @ qa) @ ra
-    except (ValueError, IndexError):
-        # Last resort: form the full matrix
+    if b.shape[1] == a.shape[0]:
+        # B (out, rank), A (rank, in)
+        qa, ra = np.linalg.qr(a.T, mode="reduced")  # qa (in, rank), ra (rank, rank)
+        qb, rb = np.linalg.qr(b, mode="reduced")    # qb (out, rank), rb (rank, rank)
+        mid = rb @ ra.T  # (rank, rank)
+    elif a.shape[1] == b.shape[0]:
+        # A (out, rank), B (rank, in) — swapped convention
+        qa, ra = np.linalg.qr(a, mode="reduced")
+        qb, rb = np.linalg.qr(b.T, mode="reduced")
+        mid = ra @ rb.T
+    else:
+        # Fallback: form the full matrix
         mid = (b @ a).astype(np.float32)
 
     s = np.linalg.svd(mid, compute_uv=False)
     s = s[: pair.rank]
 
     # Normalize to max
+    sigma0 = float(s[0])
     max_s = s[0] if s[0] > 0 else 1.0
-    return s / max_s
+    return s / max_s, sigma0
 
 
 def compute_stable_rank(
@@ -138,11 +134,10 @@ def compute_stable_rank(
     Returns stable rank as a float. Cheaper than full SVD visualization
     since we only need singular values, not the chart.
     """
-    sv = compute_lora_svd(file_path, pair, header_size, index)
+    sv, sigma0 = compute_lora_svd(file_path, pair, header_size, index)
     sq = sv * sv
-    if sq[0] > 0:
-        return float(sq.sum() / sq[0])
-    return 0.0
+    stable_rank = float(sq.sum() / sq[0]) if sq[0] > 0 else 0.0
+    return stable_rank, sigma0
 
 
 def compute_frobenius_norms(
@@ -150,10 +145,10 @@ def compute_frobenius_norms(
     pair: LoraPair,
     header_size: int,
     index: TensorIndex,
-) -> tuple[float, float]:
-    """Compute Frobenius norms of A and B tensors. No SVD needed — very cheap.
+) -> dict[str, float]:
+    """Compute element-level stats for A and B tensors. Very cheap.
 
-    Returns (||A||_F, ||B||_F).
+    Returns dict with norm, min, max, mean, median for each tensor.
     """
 
     tensor_map = {t.full_name: t for t in index.tensors}
@@ -167,4 +162,173 @@ def compute_frobenius_norms(
         file_path, header_size, b_info.data_offsets, b_info.dtype, b_info.shape
     )
 
-    return float(np.linalg.norm(a)), float(np.linalg.norm(b))
+    return {
+        "norm_a": float(np.linalg.norm(a)),
+        "norm_b": float(np.linalg.norm(b)),
+        "min_a": float(np.min(a)),
+        "max_a": float(np.max(a)),
+        "mean_a": float(np.mean(a)),
+        "median_a": float(np.median(a)),
+        "min_b": float(np.min(b)),
+        "max_b": float(np.max(b)),
+        "mean_b": float(np.mean(b)),
+        "median_b": float(np.median(b)),
+    }
+
+
+def truncate_lora_pair(
+    a: np.ndarray,
+    b: np.ndarray,
+    target_rank: int,
+    dtype: str,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Truncate a LoRA A/B pair to a lower rank via SVD.
+
+    Args:
+        a: A tensor, shape (rank, in_features) or higher-dim for conv layers.
+        b: B tensor, shape (out_features, rank) or higher-dim for conv layers.
+        target_rank: Desired output rank.
+        dtype: Original dtype string (e.g. "BF16", "F16", "F32").
+
+    Returns:
+        (a_new, b_new, energy_retained) where energy_retained is
+        sum(s[:k]^2) / sum(s^2), i.e. fraction of Frobenius energy kept.
+    """
+    a_orig_shape = a.shape
+    b_orig_shape = b.shape
+
+    # Reshape to 2D if needed (conv layers)
+    if a.ndim > 2:
+        a = a.reshape(a.shape[0], -1)
+    if b.ndim > 2:
+        b = b.reshape(b.shape[0], -1)
+
+    a = a.astype(np.float32)
+    b = b.astype(np.float32)
+
+    # B (out, rank) @ A (rank, in) — use QR trick for efficient SVD
+    # QR(A.T) where A.T is (in, rank): Qa (in, rank), Ra (rank, rank), so A = Ra.T @ Qa.T
+    # QR(B)   where B is (out, rank):  Qb (out, rank), Rb (rank, rank), so B = Qb @ Rb
+    # B @ A = Qb @ Rb @ Ra.T @ Qa.T = Qb @ (mid) @ Qa.T
+    qa, ra = np.linalg.qr(a.T, mode="reduced")  # qa (in, rank), ra (rank, rank)
+    qb, rb = np.linalg.qr(b, mode="reduced")    # qb (out, rank), rb (rank, rank)
+    mid = rb @ ra.T  # (rank, rank)
+
+    um, s, vtm = np.linalg.svd(mid, full_matrices=False)
+
+    # Energy retained: fraction of squared Frobenius norm kept
+    s_sq = s * s
+    total_energy = s_sq.sum()
+    kept_energy = s_sq[:target_rank].sum()
+    energy_retained = float(kept_energy / total_energy) if total_energy > 0 else 1.0
+
+    # Truncate to target rank
+    k = target_rank
+    s_k = s[:k]
+    um_k = um[:, :k]    # (rank, k)
+    vtm_k = vtm[:k, :]  # (k, rank)
+
+    sqrt_s = np.sqrt(s_k)
+
+    # B@A = Qb @ Um @ diag(S) @ Vtm @ Qa.T
+    # Truncated: A_new = diag(sqrt_s) @ Vtm_k @ Qa.T  -> (k, in)
+    #            B_new = Qb @ Um_k @ diag(sqrt_s)      -> (out, k)
+    a_new = (np.diag(sqrt_s) @ vtm_k) @ qa.T  # (k, in)
+    b_new = qb @ (um_k @ np.diag(sqrt_s))     # (out, k)
+
+    # Reshape back if conv layers
+    if len(a_orig_shape) > 2:
+        a_new = a_new.reshape(k, *a_orig_shape[1:])
+    if len(b_orig_shape) > 2:
+        b_new = b_new.reshape(b_orig_shape[0], k, *b_orig_shape[2:])
+
+    # Cast back to original dtype
+    a_new = _cast_to_dtype(a_new, dtype)
+    b_new = _cast_to_dtype(b_new, dtype)
+
+    return a_new, b_new, energy_retained
+
+
+def _cast_to_dtype(arr: np.ndarray, dtype: str) -> np.ndarray:
+    """Cast a float32 array back to the target safetensors dtype."""
+    if dtype == "BF16":
+        # float32 -> bf16 stored as uint16
+        return (arr.view(np.uint32) >> 16).astype(np.uint16)
+    elif dtype == "F16":
+        return arr.astype(np.float16)
+    elif dtype == "F32":
+        return arr
+    elif dtype == "F64":
+        return arr.astype(np.float64)
+    else:
+        return arr
+
+
+def load_all_tensors(
+    file_path: Path, index: TensorIndex,
+) -> dict[str, tuple[np.ndarray, str]]:
+    """Load all tensors from a safetensors file as raw arrays (no BF16 conversion).
+
+    Returns dict of name -> (raw_ndarray, dtype_string).
+    """
+    result = {}
+    for t in index.tensors:
+        np_dtype, _bpe = _DTYPE_MAP[t.dtype]
+        data_start = 8 + index.header_size + t.data_offsets[0]
+        nbytes = t.data_offsets[1] - t.data_offsets[0]
+
+        with open(file_path, "rb") as f:
+            f.seek(data_start)
+            raw = f.read(nbytes)
+
+        arr = np.frombuffer(raw, dtype=np_dtype).copy()
+        arr = arr.reshape(t.shape)
+        result[t.full_name] = (arr, t.dtype)
+    return result
+
+
+def write_safetensors(
+    path: Path,
+    tensors: dict[str, tuple[np.ndarray, str]],
+    tensor_order: list[str],
+    metadata: dict[str, str] | None = None,
+) -> None:
+    """Write a safetensors file.
+
+    Args:
+        path: Output file path.
+        tensors: Dict of name -> (ndarray, dtype_string). Arrays must already
+                 be in the correct numpy dtype for storage (e.g. uint16 for BF16).
+        tensor_order: Order in which to write tensors.
+        metadata: Optional __metadata__ dict.
+    """
+    # Build header
+    header: dict = {}
+    if metadata:
+        header["__metadata__"] = metadata
+
+    offset = 0
+    for name in tensor_order:
+        arr, dtype_str = tensors[name]
+        nbytes = arr.nbytes
+        header[name] = {
+            "dtype": dtype_str,
+            "shape": list(arr.shape),
+            "data_offsets": [offset, offset + nbytes],
+        }
+        offset += nbytes
+
+    # Serialize header
+    header_bytes = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    # Pad to 8-byte alignment
+    padding = (8 - len(header_bytes) % 8) % 8
+    header_bytes += b" " * padding
+
+    with open(path, "wb") as f:
+        # 8-byte header size
+        f.write(struct.pack("<Q", len(header_bytes)))
+        f.write(header_bytes)
+        # Tensor data in order
+        for name in tensor_order:
+            arr, _ = tensors[name]
+            f.write(arr.tobytes())

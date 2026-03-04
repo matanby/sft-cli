@@ -413,7 +413,7 @@ class SvdScreen(ModalScreen):
         try:
             from sft.data import compute_lora_svd
 
-            sv = compute_lora_svd(
+            sv, sigma0 = compute_lora_svd(
                 self.file_path,
                 pair,
                 self.index.header_size,
@@ -421,14 +421,14 @@ class SvdScreen(ModalScreen):
             )
 
             avail_w = self.app.size.width - 8  # terminal width minus borders/padding
-            chart.update(self._build_vertical_histogram(sv, avail_w))
+            chart.update(self._build_vertical_histogram(sv, avail_w, sigma0))
         except ImportError as e:
             chart.update(f"[red]{e}[/red]")
         except Exception as e:
             chart.update(f"[red]Error: {e}[/red]")
 
     @staticmethod
-    def _build_vertical_histogram(sv, avail_width: int = 120) -> str:
+    def _build_vertical_histogram(sv, avail_width: int = 120, raw_sigma0: float | None = None) -> str:
         """Build a vertical bar histogram with sqrt scale to show all values."""
         import math
 
@@ -511,12 +511,13 @@ class SvdScreen(ModalScreen):
         stable_rank = sq_sum / (values[0] * values[0]) if values[0] > 0 else 0
 
         lines.append("")
+        sigma0_str = f"  raw σ₀: [cyan]{raw_sigma0:.4f}[/cyan]" if raw_sigma0 is not None else ""
         lines.append(
             f"[bold]Effective rank:[/bold]  "
             f"90% energy: [cyan]{eff_90}[/cyan]/{n}  "
             f"99% energy: [cyan]{eff_99}[/cyan]/{n}  "
-            f"stable rank: [cyan]{stable_rank:.1f}[/cyan]  "
-            f"[dim](σ₀={values[0]:.4f}, σ{n - 1}={values[-1]:.4f})  √ scale[/dim]"
+            f"stable rank: [cyan]{stable_rank:.1f}[/cyan]{sigma0_str}  "
+            f"[dim](norm σ₀={values[0]:.4f}, σ{n - 1}={values[-1]:.4f})  √ scale[/dim]"
         )
 
         return "\n".join(lines)
@@ -596,6 +597,315 @@ class LoraHelpScreen(ModalScreen):
         yield Static("[dim]Press ESC or ? to close[/dim]")
 
 
+class CompactifyScreen(ModalScreen):
+    """Modal screen for compactifying LoRA pairs to a lower rank."""
+
+    CSS = """
+    CompactifyScreen {
+        align: center middle;
+    }
+
+    #compactify-box {
+        width: 60;
+        height: auto;
+        background: $surface;
+        border: thick $warning;
+        padding: 1 2;
+    }
+
+    #compactify-title {
+        text-align: center;
+        text-style: bold;
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    #compactify-info {
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    #compactify-input {
+        margin-bottom: 1;
+    }
+
+    #compactify-status {
+        height: auto;
+    }
+
+    #compactify-help {
+        height: auto;
+        dock: bottom;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Cancel"),
+    ]
+
+    def __init__(
+        self,
+        pairs: list[LoraPair],
+        file_path: Path,
+        index: TensorIndex,
+    ) -> None:
+        super().__init__()
+        self.pairs = pairs
+        self.file_path = file_path
+        self.index = index
+
+    def compose(self) -> ComposeResult:
+        ranks = sorted({p.rank for p in self.pairs})
+        min_rank = min(ranks)
+        with Container(id="compactify-box"):
+            yield Label("Compactify LoRA", id="compactify-title")
+            yield Static(
+                f"[bold]{len(self.pairs)}[/bold] pairs  |  "
+                f"ranks: {', '.join(str(r) for r in ranks)}\n"
+                f"Target rank must be < {min_rank}",
+                id="compactify-info",
+            )
+            yield Input(
+                placeholder=f"Rank (1–{min_rank - 1}), 'auto', or 'auto+N'",
+                id="compactify-input",
+            )
+            yield Static("", id="compactify-status")
+            yield Static(
+                "[dim]Enter: run  |  ESC: cancel[/dim]",
+                id="compactify-help",
+            )
+
+    def on_mount(self) -> None:
+        self.query_one("#compactify-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        status = self.query_one("#compactify-status", Static)
+        raw = event.value.strip().lower()
+
+        import re
+        auto_match = re.match(r"^auto(?:\+(\d+))?$", raw)
+        if auto_match:
+            margin = int(auto_match.group(1)) if auto_match.group(1) else 1
+            status.update(f"[yellow]Computing per-pair effective ranks (margin +{margin})...[/yellow]")
+            self.query_one("#compactify-input", Input).disabled = True
+            self.run_worker(
+                lambda: self._do_compactify_auto(margin), thread=True,
+            )
+            return
+
+        try:
+            target_rank = int(raw)
+        except ValueError:
+            status.update("[red]Enter an integer, 'auto', or 'auto+N'[/red]")
+            return
+
+        if target_rank < 1:
+            status.update("[red]Rank must be >= 1[/red]")
+            return
+
+        truncatable = [p for p in self.pairs if p.rank > target_rank]
+        if not truncatable:
+            status.update(f"[red]No pairs with rank > {target_rank}[/red]")
+            return
+
+        status.update(f"[yellow]Truncating {len(truncatable)} pairs to rank {target_rank}...[/yellow]")
+        self.query_one("#compactify-input", Input).disabled = True
+        self.run_worker(
+            lambda: self._do_compactify(truncatable, target_rank), thread=True,
+        )
+
+    def _do_compactify(
+        self, truncatable: list[LoraPair], target_rank: int,
+    ) -> None:
+        import traceback
+
+        from sft.data import (
+            load_all_tensors,
+            load_tensor,
+            truncate_lora_pair,
+            write_safetensors,
+        )
+
+        try:
+            all_tensors = load_all_tensors(self.file_path, self.index)
+            tensor_map = {t.full_name: t for t in self.index.tensors}
+
+            energies = []
+            for i, pair in enumerate(truncatable):
+                a_info = tensor_map[pair.a_tensor_name]
+                b_info = tensor_map[pair.b_tensor_name]
+                a = load_tensor(
+                    self.file_path, self.index.header_size,
+                    a_info.data_offsets, a_info.dtype, a_info.shape,
+                )
+                b = load_tensor(
+                    self.file_path, self.index.header_size,
+                    b_info.data_offsets, b_info.dtype, b_info.shape,
+                )
+                a_new, b_new, energy = truncate_lora_pair(a, b, target_rank, a_info.dtype)
+                all_tensors[pair.a_tensor_name] = (a_new, a_info.dtype)
+                all_tensors[pair.b_tensor_name] = (b_new, b_info.dtype)
+                energies.append(energy)
+
+                self.app.call_from_thread(
+                    self.query_one("#compactify-status", Static).update,
+                    f"[yellow]Truncated {i + 1}/{len(truncatable)} pairs...[/yellow]",
+                )
+
+            tensor_order = [t.full_name for t in self.index.tensors]
+            out_path = self.file_path.parent / f"{self.file_path.stem}_r{target_rank}.safetensors"
+
+            self.app.call_from_thread(
+                self.query_one("#compactify-status", Static).update,
+                "[yellow]Writing file...[/yellow]",
+            )
+            write_safetensors(
+                out_path,
+                all_tensors,
+                tensor_order,
+                self.index.metadata if self.index.metadata else None,
+            )
+
+            orig_size = self.file_path.stat().st_size
+            new_size = out_path.stat().st_size
+            reduction = (1 - new_size / orig_size) * 100
+
+            avg_energy = sum(energies) / len(energies) * 100
+            min_energy = min(energies) * 100
+            summary = (
+                f"[green]Saved {out_path.name} ({reduction:.0f}% smaller)\n"
+                f"Energy retained: avg {avg_energy:.1f}%, min {min_energy:.1f}% "
+                f"(across {len(truncatable)} pairs)[/green]"
+            )
+
+            self.app.call_from_thread(
+                self.query_one("#compactify-status", Static).update,
+                summary,
+            )
+            self.app.call_from_thread(
+                self.app.notify,
+                f"Saved {out_path.name} — avg energy retained: {avg_energy:.1f}%",
+            )
+        except Exception as e:
+            self.app.call_from_thread(
+                self.query_one("#compactify-status", Static).update,
+                f"[red]{traceback.format_exc()}[/red]",
+            )
+    
+
+    def _do_compactify_auto(self, margin: int = 1) -> None:
+        import math
+        import traceback
+
+        from sft.data import (
+            compute_lora_svd,
+            load_all_tensors,
+            load_tensor,
+            truncate_lora_pair,
+            write_safetensors,
+        )
+
+        try:
+            # First pass: compute effective rank for each pair
+            pair_ranks = {}
+            for i, pair in enumerate(self.pairs):
+                sv, _sigma0 = compute_lora_svd(
+                    self.file_path, pair, self.index.header_size, self.index,
+                )
+                sq = sv * sv
+                stable_rank = float(sq.sum() / sq[0]) if sq[0] > 0 else pair.rank
+                auto_rank = min(math.ceil(stable_rank) + margin, pair.rank)
+                pair_ranks[pair.base_name] = auto_rank
+
+                self.app.call_from_thread(
+                    self.query_one("#compactify-status", Static).update,
+                    f"[yellow]Computing ranks: {i + 1}/{len(self.pairs)} "
+                    f"(eff={stable_rank:.1f} → r{auto_rank})...[/yellow]",
+                )
+
+            # Filter to pairs that actually get truncated
+            truncatable = [p for p in self.pairs if pair_ranks[p.base_name] < p.rank]
+            if not truncatable:
+                self.app.call_from_thread(
+                    self.query_one("#compactify-status", Static).update,
+                    "[yellow]All pairs already at or below effective rank. Nothing to do.[/yellow]",
+                )
+                return
+
+            # Second pass: load and truncate
+            all_tensors = load_all_tensors(self.file_path, self.index)
+            tensor_map = {t.full_name: t for t in self.index.tensors}
+
+            energies = []
+            for i, pair in enumerate(truncatable):
+                target_rank = pair_ranks[pair.base_name]
+                a_info = tensor_map[pair.a_tensor_name]
+                b_info = tensor_map[pair.b_tensor_name]
+                a = load_tensor(
+                    self.file_path, self.index.header_size,
+                    a_info.data_offsets, a_info.dtype, a_info.shape,
+                )
+                b = load_tensor(
+                    self.file_path, self.index.header_size,
+                    b_info.data_offsets, b_info.dtype, b_info.shape,
+                )
+                a_new, b_new, energy = truncate_lora_pair(a, b, target_rank, a_info.dtype)
+                all_tensors[pair.a_tensor_name] = (a_new, a_info.dtype)
+                all_tensors[pair.b_tensor_name] = (b_new, b_info.dtype)
+                energies.append(energy)
+
+                self.app.call_from_thread(
+                    self.query_one("#compactify-status", Static).update,
+                    f"[yellow]Truncated {i + 1}/{len(truncatable)} pairs...[/yellow]",
+                )
+
+            tensor_order = [t.full_name for t in self.index.tensors]
+            suffix = "auto" if margin == 1 else f"auto+{margin}"
+            out_path = self.file_path.parent / f"{self.file_path.stem}_r{suffix}.safetensors"
+
+            self.app.call_from_thread(
+                self.query_one("#compactify-status", Static).update,
+                "[yellow]Writing file...[/yellow]",
+            )
+            write_safetensors(
+                out_path,
+                all_tensors,
+                tensor_order,
+                self.index.metadata if self.index.metadata else None,
+            )
+
+            orig_size = self.file_path.stat().st_size
+            new_size = out_path.stat().st_size
+            reduction = (1 - new_size / orig_size) * 100
+
+            auto_ranks = [pair_ranks[p.base_name] for p in truncatable]
+            avg_energy = sum(energies) / len(energies) * 100
+            min_energy = min(energies) * 100
+            summary = (
+                f"[green]Saved {out_path.name} ({reduction:.0f}% smaller)\n"
+                f"Per-pair rank: min {min(auto_ranks)}, max {max(auto_ranks)}, "
+                f"avg {sum(auto_ranks)/len(auto_ranks):.0f}\n"
+                f"Energy retained: avg {avg_energy:.1f}%, min {min_energy:.1f}% "
+                f"({len(truncatable)} pairs truncated, "
+                f"{len(self.pairs) - len(truncatable)} unchanged)[/green]"
+            )
+
+            self.app.call_from_thread(
+                self.query_one("#compactify-status", Static).update,
+                summary,
+            )
+            self.app.call_from_thread(
+                self.app.notify,
+                f"Saved {out_path.name} — avg energy retained: {avg_energy:.1f}%",
+            )
+        except Exception as e:
+            self.app.call_from_thread(
+                self.query_one("#compactify-status", Static).update,
+                f"[red]{traceback.format_exc()}[/red]",
+            )
+
+
 class LoraScreen(ModalScreen):
     """Modal screen showing LoRA pair analysis with a DataTable."""
 
@@ -633,9 +943,21 @@ class LoraScreen(ModalScreen):
         Binding("escape", "dismiss", "Close"),
         Binding("l", "dismiss", "Close"),
         Binding("enter", "open_svd", "SVD", priority=True),
+        Binding("s", "cycle_sort", "Sort"),
+        Binding("c", "compactify", "Compactify"),
         Binding("question_mark", "show_help", "Help"),
         Binding("e", "export_json", "Export"),
     ]
+
+    _SORT_MODES = ["name", "rank", "eff_rank", "sigma0", "norm_a", "norm_b"]
+    _SORT_LABELS = {
+        "name": "Name",
+        "rank": "Rank",
+        "eff_rank": "Eff. Rank ↓",
+        "sigma0": "σ₀ ↓",
+        "norm_a": "||A|| ↓",
+        "norm_b": "||B|| ↓",
+    }
 
     def __init__(
         self,
@@ -650,6 +972,7 @@ class LoraScreen(ModalScreen):
         self.index = index
         self.stats_cache = stats_cache
         self._pool = None
+        self._sort_index = 0  # index into _SORT_MODES
 
     def compose(self) -> ComposeResult:
         ranks = [p.rank for p in self.pairs]
@@ -664,7 +987,7 @@ class LoraScreen(ModalScreen):
         table = DataTable(id="lora-pair-table", cursor_type="row", zebra_stripes=True)
         yield table
         yield Static(
-            "[dim]↑/↓ select  |  Enter: SVD  |  e: export JSON  |  ?: help  |  ESC/L: close[/dim]",
+            "[dim]↑/↓ select  |  Enter: SVD  |  s: sort  |  c: compactify  |  e: export  |  ?: help  |  ESC/L: close[/dim]",
             id="lora-help",
         )
 
@@ -673,9 +996,10 @@ class LoraScreen(ModalScreen):
         table = self.query_one("#lora-pair-table", DataTable)
         table.add_column("Base Name", key="base_name")
         table.add_column("Rank", key="rank")
+        table.add_column("Eff. Rank", key="eff_rank")
+        table.add_column("σ₀", key="sigma0")
         table.add_column("||A||", key="norm_a")
         table.add_column("||B||", key="norm_b")
-        table.add_column("Eff. Rank", key="eff_rank")
         table.add_column("A Shape", key="a_shape")
         table.add_column("B Shape", key="b_shape")
         for i, pair in enumerate(self.pairs):
@@ -683,9 +1007,10 @@ class LoraScreen(ModalScreen):
             table.add_row(
                 pair.base_name,
                 str(pair.rank),
+                f"{cached['eff_rank']:.1f}" if "eff_rank" in cached else "...",
+                f"{cached['sigma0']:.4f}" if "sigma0" in cached else "...",
                 f"{cached['norm_a']:.2f}" if "norm_a" in cached else "...",
                 f"{cached['norm_b']:.2f}" if "norm_b" in cached else "...",
-                f"{cached['eff_rank']:.1f}" if "eff_rank" in cached else "...",
                 format_shape(pair.a_shape),
                 format_shape(pair.b_shape),
                 key=str(i),
@@ -721,17 +1046,17 @@ class LoraScreen(ModalScreen):
 
         loop = asyncio.get_event_loop()
 
-        def _calc_norms(idx: int, pair: LoraPair) -> tuple[int, str, float, float]:
-            na, nb = compute_frobenius_norms(
+        def _calc_norms(idx: int, pair: LoraPair) -> tuple[int, str, dict]:
+            stats = compute_frobenius_norms(
                 self.file_path, pair, self.index.header_size, self.index
             )
-            return idx, pair.base_name, na, nb
+            return idx, pair.base_name, stats
 
-        def _calc_rank(idx: int, pair: LoraPair) -> tuple[int, str, float]:
-            sr = compute_stable_rank(
+        def _calc_rank(idx: int, pair: LoraPair) -> tuple[int, str, float, float]:
+            sr, sigma0 = compute_stable_rank(
                 self.file_path, pair, self.index.header_size, self.index
             )
-            return idx, pair.base_name, sr
+            return idx, pair.base_name, sr, sigma0
 
         self._pool = ThreadPoolExecutor(max_workers=4)
         pool = self._pool
@@ -743,11 +1068,11 @@ class LoraScreen(ModalScreen):
             ]
             for fut in asyncio.as_completed(futures):
                 try:
-                    idx, name, na, nb = await fut
-                    self.stats_cache.setdefault(name, {}).update(norm_a=na, norm_b=nb)
+                    idx, name, stats = await fut
+                    self.stats_cache.setdefault(name, {}).update(stats)
                     table = self.query_one("#lora-pair-table", DataTable)
-                    table.update_cell(str(idx), "norm_a", f"{na:.2f}")
-                    table.update_cell(str(idx), "norm_b", f"{nb:.2f}")
+                    table.update_cell(str(idx), "norm_a", f"{stats['norm_a']:.2f}")
+                    table.update_cell(str(idx), "norm_b", f"{stats['norm_b']:.2f}")
                 except Exception:
                     pass
 
@@ -758,12 +1083,13 @@ class LoraScreen(ModalScreen):
             ]
             for fut in asyncio.as_completed(futures):
                 try:
-                    idx, name, sr = await fut
-                    self.stats_cache.setdefault(name, {})[  # noqa: B909
-                        "eff_rank"
-                    ] = sr
+                    idx, name, sr, sigma0 = await fut
+                    self.stats_cache.setdefault(name, {}).update(
+                        eff_rank=sr, sigma0=sigma0,
+                    )
                     table = self.query_one("#lora-pair-table", DataTable)
                     table.update_cell(str(idx), "eff_rank", f"{sr:.1f}")
+                    table.update_cell(str(idx), "sigma0", f"{sigma0:.4f}")
                 except Exception:
                     pass
 
@@ -780,12 +1106,66 @@ class LoraScreen(ModalScreen):
         """Clean up when screen is removed."""
         self._shutdown_pool()
 
+    def action_cycle_sort(self) -> None:
+        """Cycle through sort modes and re-sort the table."""
+        self._sort_index = (self._sort_index + 1) % len(self._SORT_MODES)
+        mode = self._SORT_MODES[self._sort_index]
+        label = self._SORT_LABELS[mode]
+
+        table = self.query_one("#lora-pair-table", DataTable)
+
+        if mode == "name":
+            # Sort by original pair order (name)
+            order = list(range(len(self.pairs)))
+        elif mode == "rank":
+            order = sorted(range(len(self.pairs)),
+                           key=lambda i: self.pairs[i].rank, reverse=True)
+        else:
+            # Sort by cached numeric stat (eff_rank, norm_a, norm_b)
+            def _stat(i: int) -> float:
+                cached = self.stats_cache.get(self.pairs[i].base_name, {})
+                return cached.get(mode, -1.0)
+            order = sorted(range(len(self.pairs)), key=_stat, reverse=True)
+
+        # Rebuild table rows in new order
+        table.clear()
+        # Remap pairs list to match new order
+        reordered = [self.pairs[i] for i in order]
+        self.pairs = reordered
+        for i, pair in enumerate(self.pairs):
+            cached = self.stats_cache.get(pair.base_name, {})
+            table.add_row(
+                pair.base_name,
+                str(pair.rank),
+                f"{cached['eff_rank']:.1f}" if "eff_rank" in cached else "...",
+                f"{cached['sigma0']:.4f}" if "sigma0" in cached else "...",
+                f"{cached['norm_a']:.2f}" if "norm_a" in cached else "...",
+                f"{cached['norm_b']:.2f}" if "norm_b" in cached else "...",
+                format_shape(pair.a_shape),
+                format_shape(pair.b_shape),
+                key=str(i),
+            )
+
+        summary = self.query_one("#lora-summary", Static)
+        ranks = [p.rank for p in self.pairs]
+        unique_ranks = sorted(set(ranks))
+        rank_dist = ", ".join(f"r{r}:×{ranks.count(r)}" for r in unique_ranks)
+        summary.update(
+            f"[bold]{len(self.pairs)}[/bold] pairs  |  ranks: {rank_dist}  |  sort: [cyan]{label}[/cyan]"
+        )
+
     def action_open_svd(self) -> None:
         """Open SVD screen for the selected pair."""
         table = self.query_one("#lora-pair-table", DataTable)
         if table.cursor_row is not None and table.cursor_row < len(self.pairs):
             pair = self.pairs[table.cursor_row]
             self.app.push_screen(SvdScreen(pair, self.file_path, self.index))
+
+    def action_compactify(self) -> None:
+        """Open compactify screen."""
+        self.app.push_screen(
+            CompactifyScreen(self.pairs, self.file_path, self.index)
+        )
 
     def action_show_help(self) -> None:
         """Show LoRA analysis help screen."""
@@ -804,12 +1184,10 @@ class LoraScreen(ModalScreen):
                 "a_shape": list(pair.a_shape),
                 "b_shape": list(pair.b_shape),
             }
-            if "norm_a" in cached:
-                entry["norm_a"] = round(cached["norm_a"], 4)
-            if "norm_b" in cached:
-                entry["norm_b"] = round(cached["norm_b"], 4)
-            if "eff_rank" in cached:
-                entry["eff_rank"] = round(cached["eff_rank"], 2)
+            for key in ("norm_a", "norm_b", "min_a", "max_a", "mean_a", "median_a",
+                        "min_b", "max_b", "mean_b", "median_b", "eff_rank", "sigma0"):
+                if key in cached:
+                    entry[key] = round(cached[key], 4)
             export.append(entry)
 
         out_path = self.file_path.with_suffix(".lora_analysis.json")

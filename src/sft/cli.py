@@ -6,9 +6,11 @@ import typer
 
 from sft import __version__
 
+SUPPORTED_EXTENSIONS = {".safetensors", ".pt", ".pth"}
+
 app = typer.Typer(
     name="sft",
-    help="An interactive terminal browser for .safetensors files.",
+    help="An interactive terminal browser for .safetensors and .pt/.pth files.",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -25,7 +27,7 @@ def version_callback(value: bool) -> None:
 def main(
     file: Path = typer.Argument(
         ...,
-        help="Path to a .safetensors file to browse.",
+        help="Path to a .safetensors, .pt, or .pth file to browse.",
         exists=True,
         file_okay=True,
         dir_okay=False,
@@ -41,11 +43,11 @@ def main(
         is_eager=True,
     ),
 ) -> None:
-    """Open an interactive browser for a .safetensors file."""
+    """Open an interactive browser for a .safetensors, .pt, or .pth file."""
     # Validate file extension
-    if file.suffix.lower() != ".safetensors":
+    if file.suffix.lower() not in SUPPORTED_EXTENSIONS:
         typer.secho(
-            f"Error: Expected a .safetensors file, got '{file.suffix}'",
+            f"Error: Expected a .safetensors, .pt, or .pth file, got '{file.suffix}'",
             fg=typer.colors.RED,
             err=True,
         )

@@ -1,8 +1,9 @@
-"""Data model and parsing for safetensors files."""
+"""Data model and parsing for tensor checkpoint files."""
 
 from __future__ import annotations
 
 import re
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -51,10 +52,21 @@ class TensorIndex:
 
     @classmethod
     def from_file(cls, path: Path) -> TensorIndex:
-        """Parse a safetensors file and extract tensor metadata (header only).
+        """Parse a tensor file based on extension.
 
-        This uses direct header parsing to avoid loading any tensor data.
+        Supports .safetensors, .pt, and .pth files.
         """
+        suffix = path.suffix.lower()
+        if suffix == ".safetensors":
+            return cls._from_safetensors(path)
+        elif suffix in (".pt", ".pth"):
+            return cls._from_pt_file(path)
+        else:
+            raise ValueError(f"Unsupported file format: '{suffix}'")
+
+    @classmethod
+    def _from_safetensors(cls, path: Path) -> TensorIndex:
+        """Parse a safetensors file and extract tensor metadata (header only)."""
         import json
         import struct
 
@@ -99,6 +111,54 @@ class TensorIndex:
         tensors.sort(key=lambda t: natural_sort_key(t.full_name))
 
         return cls(tensors=tensors, metadata=metadata, file_path=path)
+
+    @classmethod
+    def _from_pt_file(cls, path: Path) -> TensorIndex:
+        """Parse a PyTorch .pt/.pth file and extract tensor metadata."""
+        import torch
+
+        try:
+            data = torch.load(path, map_location="cpu", weights_only=True)
+        except Exception:
+            warnings.warn(
+                "weights_only=True failed; falling back to weights_only=False. "
+                "Only load .pt files you trust.",
+                stacklevel=2,
+            )
+            data = torch.load(path, map_location="cpu", weights_only=False)
+
+        # Extract state dict from various formats
+        if isinstance(data, dict):
+            # Check for common state dict wrapper keys
+            for key in ("state_dict", "model_state_dict", "model"):
+                if key in data and isinstance(data[key], dict):
+                    state_dict = data[key]
+                    break
+            else:
+                state_dict = data
+        elif hasattr(data, "state_dict"):
+            state_dict = data.state_dict()
+        else:
+            raise ValueError(
+                "Unsupported .pt format: expected a dict or module with state_dict()"
+            )
+
+        tensors: list[TensorInfo] = []
+        for name, value in state_dict.items():
+            if not hasattr(value, "shape"):
+                continue
+            tensors.append(
+                TensorInfo(
+                    full_name=name,
+                    shape=tuple(value.shape),
+                    dtype=str(value.dtype).replace("torch.", ""),
+                    nbytes=value.nelement() * value.element_size(),
+                )
+            )
+
+        tensors.sort(key=lambda t: natural_sort_key(t.full_name))
+
+        return cls(tensors=tensors, metadata={}, file_path=path)
 
     @property
     def total_tensors(self) -> int:

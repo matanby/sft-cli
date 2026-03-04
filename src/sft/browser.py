@@ -1,4 +1,4 @@
-"""Textual TUI application for browsing safetensors files."""
+"""Textual TUI application for browsing tensor checkpoint files."""
 
 from __future__ import annotations
 
@@ -680,7 +680,7 @@ class SearchInput(Input):
 
 
 class SftApp(App):
-    """Interactive browser for .safetensors files."""
+    """Interactive browser for tensor checkpoint files."""
 
     TITLE = "sft"
 

@@ -25,6 +25,7 @@ classifiers = [
 ]
 dependencies = [
     "textual>=0.40",
+    "torch",
     "typer>=0.9",
 ]
 

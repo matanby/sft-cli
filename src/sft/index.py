@@ -26,6 +26,7 @@ class TensorInfo:
     shape: tuple[int, ...]
     dtype: str
     nbytes: int
+    data_offsets: tuple[int, int] = (0, 0)
 
     @property
     def rank(self) -> int:
@@ -48,6 +49,7 @@ class TensorIndex:
     tensors: list[TensorInfo]
     metadata: dict[str, Any]
     file_path: Path
+    header_size: int = 0
 
     @classmethod
     def from_file(cls, path: Path) -> TensorIndex:
@@ -92,13 +94,14 @@ class TensorIndex:
                     shape=shape,
                     dtype=dtype_str,
                     nbytes=nbytes,
+                    data_offsets=(data_offsets[0], data_offsets[1]),
                 )
             )
 
         # Sort tensors by name for consistent ordering (natural sort)
         tensors.sort(key=lambda t: natural_sort_key(t.full_name))
 
-        return cls(tensors=tensors, metadata=metadata, file_path=path)
+        return cls(tensors=tensors, metadata=metadata, file_path=path, header_size=header_size)
 
     @property
     def total_tensors(self) -> int:

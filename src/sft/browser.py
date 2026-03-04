@@ -9,7 +9,7 @@ from pathlib import Path
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container
+from textual.containers import Container, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Input, Label, Static, Tree
@@ -22,6 +22,7 @@ from sft.index import (
     TensorInfo,
     natural_sort_key,
 )
+from sft.lora import LoraInfo, LoraPair, detect_lora_pairs
 
 
 def format_bytes(nbytes: int) -> str:
@@ -105,9 +106,10 @@ class TensorDetailScreen(ModalScreen):
         Binding("space", "dismiss", "Close"),
     ]
 
-    def __init__(self, tensor: TensorInfo) -> None:
+    def __init__(self, tensor: TensorInfo, lora_info: LoraInfo | None = None) -> None:
         super().__init__()
         self.tensor = tensor
+        self.lora_info = lora_info
 
     def compose(self) -> ComposeResult:
         t = self.tensor
@@ -124,6 +126,23 @@ class TensorDetailScreen(ModalScreen):
                 classes="detail-row",
             )
             yield Static(f"[dim]Numel:[/dim] {t.numel:,}", classes="detail-row")
+
+            if self.lora_info:
+                li = self.lora_info
+                yield Static("", classes="detail-row")
+                yield Static("[bold cyan]LoRA Info[/bold cyan]", classes="detail-row")
+                yield Static(f"[dim]Role:[/dim]  {li.role.value}", classes="detail-row")
+                yield Static(f"[dim]Rank:[/dim]  {li.pair.rank}", classes="detail-row")
+                yield Static(
+                    f"[dim]Base:[/dim]  {li.pair.base_name}", classes="detail-row"
+                )
+                paired = (
+                    li.pair.b_tensor_name
+                    if li.role.name == "A"
+                    else li.pair.a_tensor_name
+                )
+                yield Static(f"[dim]Pair:[/dim]  {paired}", classes="detail-row")
+
             yield Static(
                 "\n[dim]Press ESC or SPACE to close[/dim]", classes="detail-row"
             )
@@ -320,6 +339,483 @@ class FilterScreen(ModalScreen):
         if self.selected_dtypes:
             filters["dtypes"] = list(self.selected_dtypes)
         self.dismiss(filters)
+
+
+class SvdScreen(ModalScreen):
+    """Modal screen showing SVD vertical histogram for a single LoRA pair."""
+
+    CSS = """
+    SvdScreen {
+        layout: vertical;
+        background: $surface;
+        border: thick $accent;
+        padding: 1 2;
+    }
+
+    #svd-title {
+        text-align: center;
+        text-style: bold;
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    #svd-info {
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    #svd-scroll {
+        height: 1fr;
+    }
+
+    #svd-help {
+        height: auto;
+        dock: bottom;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+    ]
+
+    def __init__(
+        self,
+        pair: LoraPair,
+        file_path: Path,
+        index: TensorIndex,
+    ) -> None:
+        super().__init__()
+        self.pair = pair
+        self.file_path = file_path
+        self.index = index
+
+    def compose(self) -> ComposeResult:
+        pair = self.pair
+        yield Label("SVD Spectrum", id="svd-title")
+        yield Static(
+            f"[bold]{pair.base_name}[/bold]  "
+            f"[dim]rank={pair.rank}  "
+            f"A {format_shape(pair.a_shape)}  B {format_shape(pair.b_shape)}[/dim]",
+            id="svd-info",
+        )
+        with VerticalScroll(id="svd-scroll"):
+            yield Static("[dim]Computing...[/dim]", id="svd-chart")
+        yield Static("[dim]ESC: close[/dim]", id="svd-help")
+
+    def on_mount(self) -> None:
+        """Compute SVD after layout so we know the terminal width."""
+        self.call_after_refresh(self._run_svd)
+
+    def _run_svd(self) -> None:
+        """Compute SVD and update the chart."""
+        chart = self.query_one("#svd-chart", Static)
+        pair = self.pair
+        try:
+            from sft.data import compute_lora_svd
+
+            sv = compute_lora_svd(
+                self.file_path,
+                pair,
+                self.index.header_size,
+                self.index,
+            )
+
+            avail_w = self.app.size.width - 8  # terminal width minus borders/padding
+            chart.update(self._build_vertical_histogram(sv, avail_w))
+        except ImportError as e:
+            chart.update(f"[red]{e}[/red]")
+        except Exception as e:
+            chart.update(f"[red]Error: {e}[/red]")
+
+    @staticmethod
+    def _build_vertical_histogram(sv, avail_width: int = 120) -> str:
+        """Build a vertical bar histogram with sqrt scale to show all values."""
+        import math
+
+        n = len(sv)
+        if n == 0:
+            return "[dim]No singular values[/dim]"
+
+        values = [float(sv[i]) for i in range(n)]
+        max_val = max(values) if values else 1.0
+
+        # Use sqrt scale so smaller values are visible
+        scaled = [math.sqrt(v / max_val) for v in values]
+
+        # Layout: prefix "1.000 │" = 8 chars
+        prefix_w = 8
+        chart_w = avail_width - prefix_w
+        if chart_w < n:
+            chart_w = n
+
+        # Bar width: fill available space evenly
+        bar_w = max(1, chart_w // n)
+        gap = 1 if bar_w > 1 else 0
+        # Recalc bar_w accounting for gaps
+        if gap and n > 1:
+            bar_w = max(1, (chart_w - (n - 1) * gap) // n)
+        total_w = n * bar_w + max(0, n - 1) * gap
+
+        chart_h = 18
+        heights = [max(1, int(s * chart_h)) if s > 0.01 else 0 for s in scaled]
+
+        lines = []
+        for row in range(chart_h, 0, -1):
+            cells = []
+            for i, h in enumerate(heights):
+                block = "█" * bar_w if h >= row else " " * bar_w
+                if i > 0 and gap:
+                    cells.append(" " * gap)
+                cells.append(block)
+            # Y-axis labels (show actual values, not sqrt)
+            if row == chart_h:
+                label = f"{max_val:.3f}│"
+            elif row == 1:
+                label = "  0.00│"
+            else:
+                label = "      │"
+            lines.append(f"{label:>8}{''.join(cells)}")
+
+        # X axis
+        lines.append(f"{'─' * 7}┼{'─' * total_w}")
+
+        # Index labels below axis
+        idx_line = list(" " * total_w)
+        step = bar_w + gap
+        for idx in (0, n // 4, n // 2, 3 * n // 4, n - 1):
+            if idx >= n:
+                continue
+            pos = idx * step
+            s = f"σ{idx}"
+            for ci, ch in enumerate(s):
+                p = pos + ci
+                if p < total_w:
+                    idx_line[p] = ch
+        lines.append(f"{'':>8}{''.join(idx_line)}")
+
+        # Effective rank statistics
+        total = sum(values)
+        cumsum = 0.0
+        eff_90 = n
+        eff_99 = n
+        for i, v in enumerate(values):
+            cumsum += v
+            if cumsum >= total * 0.90 and eff_90 == n:
+                eff_90 = i + 1
+            if cumsum >= total * 0.99 and eff_99 == n:
+                eff_99 = i + 1
+                break
+
+        # Stable rank: ||A||_F^2 / ||A||_2^2 = sum(σ^2) / σ_0^2
+        sq_sum = sum(v * v for v in values)
+        stable_rank = sq_sum / (values[0] * values[0]) if values[0] > 0 else 0
+
+        lines.append("")
+        lines.append(
+            f"[bold]Effective rank:[/bold]  "
+            f"90% energy: [cyan]{eff_90}[/cyan]/{n}  "
+            f"99% energy: [cyan]{eff_99}[/cyan]/{n}  "
+            f"stable rank: [cyan]{stable_rank:.1f}[/cyan]  "
+            f"[dim](σ₀={values[0]:.4f}, σ{n - 1}={values[-1]:.4f})  √ scale[/dim]"
+        )
+
+        return "\n".join(lines)
+
+
+class LoraHelpScreen(ModalScreen):
+    """Help screen explaining LoRA analysis metrics."""
+
+    CSS = """
+    LoraHelpScreen {
+        layout: vertical;
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+        overflow-y: auto;
+    }
+
+    #lora-help-title {
+        text-align: center;
+        text-style: bold;
+        height: auto;
+        margin-bottom: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+        Binding("question_mark", "dismiss", "Close"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield Label("LoRA Analysis — Help", id="lora-help-title")
+        yield Static(
+            "[bold]Frobenius Norm  ||A||, ||B||[/bold]\n"
+            "The Frobenius norm is the square root of the sum of all\n"
+            "squared elements: ||M|| = √(Σ mᵢⱼ²). It measures the\n"
+            "overall magnitude of a matrix.\n"
+            "\n"
+            "For LoRA, ||A|| and ||B|| tell you how large each factor\n"
+            "is. Layers with large norms are being modified more\n"
+            "aggressively. Comparing norms across layers reveals where\n"
+            "the fine-tuning concentrates its effort. Unusually small\n"
+            "norms may indicate dead or underutilized layers.\n"
+        )
+        yield Static(
+            "[bold]Effective Rank  (Stable Rank)[/bold]\n"
+            "Stable rank = Σσᵢ² / σ₀², where σᵢ are the singular\n"
+            "values of the effective matrix B@A.\n"
+            "\n"
+            'It answers: "how many equal singular values would produce\n'
+            'the same energy distribution?" Unlike hard thresholds,\n'
+            "stable rank is continuous — a small perturbation won't\n"
+            "cause a jump.\n"
+            "\n"
+            "  • Stable rank ≈ 1  →  rank-1 in disguise. The LoRA\n"
+            "    update is dominated by a single direction. The\n"
+            "    allocated rank is mostly wasted.\n"
+            "  • Stable rank ≈ rank  →  full utilization. All\n"
+            "    dimensions contribute equally.\n"
+            "  • Stable rank << rank  →  the LoRA could be retrained\n"
+            "    at a lower rank for similar quality.\n"
+            "\n"
+            "Related to the Herfindahl-Hirschman Index (HHI) from\n"
+            "economics: if you treat σᵢ²/Σσⱼ² as market shares,\n"
+            '1/HHI gives the "effective number of players" —\n'
+            "a closely analogous measure.\n"
+        )
+        yield Static(
+            "[bold]SVD Spectrum[/bold]\n"
+            "The singular value decomposition of B@A shows how the\n"
+            "LoRA's contribution decomposes into independent rank-1\n"
+            "updates, ordered by importance (σ₀ ≥ σ₁ ≥ ... ≥ σᵣ).\n"
+            "\n"
+            "The histogram uses √ scale so smaller values remain\n"
+            "visible alongside dominant ones.\n"
+        )
+        yield Static("[dim]Press ESC or ? to close[/dim]")
+
+
+class LoraScreen(ModalScreen):
+    """Modal screen showing LoRA pair analysis with a DataTable."""
+
+    CSS = """
+    LoraScreen {
+        layout: vertical;
+        background: $surface;
+        border: thick $warning;
+        padding: 1 2;
+    }
+
+    #lora-title {
+        text-align: center;
+        text-style: bold;
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    #lora-summary {
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    #lora-pair-table {
+        height: 1fr;
+    }
+
+    #lora-help {
+        height: auto;
+        dock: bottom;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+        Binding("l", "dismiss", "Close"),
+        Binding("enter", "open_svd", "SVD", priority=True),
+        Binding("question_mark", "show_help", "Help"),
+        Binding("e", "export_json", "Export"),
+    ]
+
+    def __init__(
+        self,
+        pairs: list[LoraPair],
+        file_path: Path,
+        index: TensorIndex,
+        stats_cache: dict[str, dict],
+    ) -> None:
+        super().__init__()
+        self.pairs = pairs
+        self.file_path = file_path
+        self.index = index
+        self.stats_cache = stats_cache
+        self._pool = None
+
+    def compose(self) -> ComposeResult:
+        ranks = [p.rank for p in self.pairs]
+        unique_ranks = sorted(set(ranks))
+        rank_dist = ", ".join(f"r{r}:×{ranks.count(r)}" for r in unique_ranks)
+
+        yield Label("LoRA Analysis", id="lora-title")
+        yield Static(
+            f"[bold]{len(self.pairs)}[/bold] pairs  |  ranks: {rank_dist}",
+            id="lora-summary",
+        )
+        table = DataTable(id="lora-pair-table", cursor_type="row", zebra_stripes=True)
+        yield table
+        yield Static(
+            "[dim]↑/↓ select  |  Enter: SVD  |  e: export JSON  |  ?: help  |  ESC/L: close[/dim]",
+            id="lora-help",
+        )
+
+    def on_mount(self) -> None:
+        """Populate the pair table from cache, then compute missing stats."""
+        table = self.query_one("#lora-pair-table", DataTable)
+        table.add_column("Base Name", key="base_name")
+        table.add_column("Rank", key="rank")
+        table.add_column("||A||", key="norm_a")
+        table.add_column("||B||", key="norm_b")
+        table.add_column("Eff. Rank", key="eff_rank")
+        table.add_column("A Shape", key="a_shape")
+        table.add_column("B Shape", key="b_shape")
+        for i, pair in enumerate(self.pairs):
+            cached = self.stats_cache.get(pair.base_name, {})
+            table.add_row(
+                pair.base_name,
+                str(pair.rank),
+                f"{cached['norm_a']:.2f}" if "norm_a" in cached else "...",
+                f"{cached['norm_b']:.2f}" if "norm_b" in cached else "...",
+                f"{cached['eff_rank']:.1f}" if "eff_rank" in cached else "...",
+                format_shape(pair.a_shape),
+                format_shape(pair.b_shape),
+                key=str(i),
+            )
+        table.focus()
+
+        # Only compute stats for pairs not yet cached
+        missing_norms = [
+            (i, p)
+            for i, p in enumerate(self.pairs)
+            if "norm_a" not in self.stats_cache.get(p.base_name, {})
+        ]
+        missing_ranks = [
+            (i, p)
+            for i, p in enumerate(self.pairs)
+            if "eff_rank" not in self.stats_cache.get(p.base_name, {})
+        ]
+        if missing_norms or missing_ranks:
+            self.run_worker(
+                self._compute_missing(missing_norms, missing_ranks), thread=True
+            )
+
+    async def _compute_missing(
+        self,
+        missing_norms: list[tuple[int, LoraPair]],
+        missing_ranks: list[tuple[int, LoraPair]],
+    ) -> None:
+        """Compute only uncached stats using a thread pool."""
+        import asyncio
+        from concurrent.futures import ThreadPoolExecutor
+
+        from sft.data import compute_frobenius_norms, compute_stable_rank
+
+        loop = asyncio.get_event_loop()
+
+        def _calc_norms(idx: int, pair: LoraPair) -> tuple[int, str, float, float]:
+            na, nb = compute_frobenius_norms(
+                self.file_path, pair, self.index.header_size, self.index
+            )
+            return idx, pair.base_name, na, nb
+
+        def _calc_rank(idx: int, pair: LoraPair) -> tuple[int, str, float]:
+            sr = compute_stable_rank(
+                self.file_path, pair, self.index.header_size, self.index
+            )
+            return idx, pair.base_name, sr
+
+        self._pool = ThreadPoolExecutor(max_workers=4)
+        pool = self._pool
+
+        # Frobenius norms
+        if missing_norms:
+            futures = [
+                loop.run_in_executor(pool, _calc_norms, i, p) for i, p in missing_norms
+            ]
+            for fut in asyncio.as_completed(futures):
+                try:
+                    idx, name, na, nb = await fut
+                    self.stats_cache.setdefault(name, {}).update(norm_a=na, norm_b=nb)
+                    table = self.query_one("#lora-pair-table", DataTable)
+                    table.update_cell(str(idx), "norm_a", f"{na:.2f}")
+                    table.update_cell(str(idx), "norm_b", f"{nb:.2f}")
+                except Exception:
+                    pass
+
+        # Stable rank
+        if missing_ranks:
+            futures = [
+                loop.run_in_executor(pool, _calc_rank, i, p) for i, p in missing_ranks
+            ]
+            for fut in asyncio.as_completed(futures):
+                try:
+                    idx, name, sr = await fut
+                    self.stats_cache.setdefault(name, {})[  # noqa: B909
+                        "eff_rank"
+                    ] = sr
+                    table = self.query_one("#lora-pair-table", DataTable)
+                    table.update_cell(str(idx), "eff_rank", f"{sr:.1f}")
+                except Exception:
+                    pass
+
+        pool.shutdown(wait=False)
+        self._pool = None
+
+    def _shutdown_pool(self) -> None:
+        """Shut down the thread pool if running."""
+        if self._pool is not None:
+            self._pool.shutdown(wait=False, cancel_futures=True)
+            self._pool = None
+
+    def on_unmount(self) -> None:
+        """Clean up when screen is removed."""
+        self._shutdown_pool()
+
+    def action_open_svd(self) -> None:
+        """Open SVD screen for the selected pair."""
+        table = self.query_one("#lora-pair-table", DataTable)
+        if table.cursor_row is not None and table.cursor_row < len(self.pairs):
+            pair = self.pairs[table.cursor_row]
+            self.app.push_screen(SvdScreen(pair, self.file_path, self.index))
+
+    def action_show_help(self) -> None:
+        """Show LoRA analysis help screen."""
+        self.app.push_screen(LoraHelpScreen())
+
+    def action_export_json(self) -> None:
+        """Export LoRA analysis to JSON file."""
+        export = []
+        for pair in self.pairs:
+            cached = self.stats_cache.get(pair.base_name, {})
+            entry = {
+                "base_name": pair.base_name,
+                "rank": pair.rank,
+                "a_tensor": pair.a_tensor_name,
+                "b_tensor": pair.b_tensor_name,
+                "a_shape": list(pair.a_shape),
+                "b_shape": list(pair.b_shape),
+            }
+            if "norm_a" in cached:
+                entry["norm_a"] = round(cached["norm_a"], 4)
+            if "norm_b" in cached:
+                entry["norm_b"] = round(cached["norm_b"], 4)
+            if "eff_rank" in cached:
+                entry["eff_rank"] = round(cached["eff_rank"], 2)
+            export.append(entry)
+
+        out_path = self.file_path.with_suffix(".lora_analysis.json")
+        with open(out_path, "w") as f:
+            json.dump(export, f, indent=2)
+        self.app.notify(f"Exported to {out_path.name}", severity="information")
 
 
 class FilteredPrefixTree:
@@ -717,6 +1213,7 @@ class SftApp(App):
         Binding("f", "show_filters", "Filter", show=True),
         Binding("space", "show_details", "Details", show=True),
         Binding("m", "show_metadata", "Metadata", show=True),
+        Binding("l", "show_lora", "LoRA", show=True),
         Binding("g", "goto_top", "Top", show=False),
         Binding("G", "goto_bottom", "Bottom", show=False),
     ]
@@ -733,6 +1230,11 @@ class SftApp(App):
         self._sort_mode_index: int = 0
         self._search_active: bool = False
         self._current_filters: dict = {}
+        self._lora_pairs: list[LoraPair] = []
+        self._tensor_lora_map: dict[str, LoraInfo] = {}
+        self._lora_stats_cache: dict[
+            str, dict
+        ] = {}  # base_name → {norm_a, norm_b, eff_rank}
 
     def compose(self) -> ComposeResult:
         """Compose the UI layout."""
@@ -744,6 +1246,10 @@ class SftApp(App):
             self.prefix_tree = PrefixTree(self.index)
             self._all_tensors = self.index.tensors.copy()
             self._base_tensors = self.index.tensors.copy()
+            self._lora_pairs, self._tensor_lora_map = detect_lora_pairs(
+                self.index.tensors
+            )
+            self._load_lora_stats_cache()
         except Exception as e:
             yield Static(f"Error loading file: {e}", id="error")
             return
@@ -751,6 +1257,30 @@ class SftApp(App):
         yield HierarchyTree(self.prefix_tree)
         yield TensorTable()
         yield SearchInput()
+
+    def _load_lora_stats_cache(self) -> None:
+        """Load previously exported LoRA analysis JSON if it exists."""
+        json_path = self.file_path.with_suffix(".lora_analysis.json")
+        if not json_path.exists():
+            return
+        try:
+            with open(json_path) as f:
+                data = json.load(f)
+            for entry in data:
+                name = entry.get("base_name", "")
+                if not name:
+                    continue
+                cached: dict = {}
+                if "norm_a" in entry:
+                    cached["norm_a"] = float(entry["norm_a"])
+                if "norm_b" in entry:
+                    cached["norm_b"] = float(entry["norm_b"])
+                if "eff_rank" in entry:
+                    cached["eff_rank"] = float(entry["eff_rank"])
+                if cached:
+                    self._lora_stats_cache[name] = cached
+        except Exception:
+            pass  # Silently ignore corrupt/unreadable files
 
     def on_mount(self) -> None:
         """Initialize the view after mounting."""
@@ -764,6 +1294,14 @@ class SftApp(App):
         # Focus the tree
         tree = self.query_one(HierarchyTree)
         tree.focus()
+
+    def action_quit(self) -> None:
+        """Shut down any running computation threads and quit."""
+        for screen in self.screen_stack:
+            if isinstance(screen, LoraScreen):
+                screen._shutdown_pool()
+        self.workers.cancel_all()
+        self.exit()
 
     def on_hierarchy_tree_node_selected(
         self, event: HierarchyTree.NodeSelected
@@ -887,12 +1425,44 @@ class SftApp(App):
         tensor = table.get_selected_tensor()
 
         if tensor:
-            self.push_screen(TensorDetailScreen(tensor))
+            lora_info = self._tensor_lora_map.get(tensor.full_name)
+            self.push_screen(TensorDetailScreen(tensor, lora_info))
 
     def action_show_metadata(self) -> None:
         """Show file metadata popup."""
         if self.index:
             self.push_screen(MetadataScreen(self.index.metadata, self.file_path))
+
+    def action_show_lora(self) -> None:
+        """Show LoRA analysis, filtered to visible tensors. Single match → SVD directly."""
+        if not self._lora_pairs:
+            self.notify("No LoRA pairs detected in this file", severity="warning")
+            return
+
+        # Filter pairs to those with at least one tensor in the current view
+        visible_names = {t.full_name for t in self._all_tensors}
+        filtered_pairs = [
+            p
+            for p in self._lora_pairs
+            if p.a_tensor_name in visible_names or p.b_tensor_name in visible_names
+        ]
+
+        if not filtered_pairs:
+            # Fall back to all pairs
+            filtered_pairs = self._lora_pairs
+
+        if len(filtered_pairs) == 1:
+            # Single pair — go straight to SVD
+            self.push_screen(SvdScreen(filtered_pairs[0], self.file_path, self.index))
+        else:
+            self.push_screen(
+                LoraScreen(
+                    filtered_pairs,
+                    self.file_path,
+                    self.index,
+                    self._lora_stats_cache,
+                )
+            )
 
     def action_show_filters(self) -> None:
         """Show filter palette."""

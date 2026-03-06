@@ -149,17 +149,11 @@ class TensorDetailScreen(ModalScreen):
 
 
 class MetadataScreen(ModalScreen):
-    """Modal screen showing file metadata."""
+    """Interactive metadata editor for safetensors files."""
 
     CSS = """
     MetadataScreen {
-        align: center middle;
-    }
-
-    #metadata-container {
-        width: 70;
-        height: auto;
-        max-height: 80%;
+        layout: vertical;
         background: $surface;
         border: thick $secondary;
         padding: 1 2;
@@ -168,37 +162,263 @@ class MetadataScreen(ModalScreen):
     #metadata-title {
         text-align: center;
         text-style: bold;
+        height: auto;
         margin-bottom: 1;
     }
 
-    #metadata-content {
+    #metadata-info {
         height: auto;
-        max-height: 20;
+        margin-bottom: 1;
+    }
+
+    #metadata-table {
+        height: 1fr;
+    }
+
+    #metadata-status {
+        height: auto;
+    }
+
+    #metadata-help {
+        height: auto;
+        dock: bottom;
     }
     """
 
     BINDINGS = [
         Binding("escape", "dismiss", "Close"),
         Binding("m", "dismiss", "Close"),
+        Binding("e", "edit_field", "Edit"),
+        Binding("a", "add_field", "Add"),
+        Binding("d", "delete_field", "Delete"),
+        Binding("ctrl+s", "save", "Save"),
     ]
 
-    def __init__(self, metadata: dict, file_path: Path) -> None:
+    def __init__(self, metadata: dict, file_path: Path, index) -> None:
         super().__init__()
-        self.metadata = metadata
+        self.metadata = dict(metadata)  # mutable copy
         self.file_path = file_path
+        self.index = index
+        self._dirty = False
 
     def compose(self) -> ComposeResult:
-        with Container(id="metadata-container"):
-            yield Label("File Metadata", id="metadata-title")
-            yield Static(f"[dim]File:[/dim] {self.file_path.name}")
+        yield Label("Metadata Editor", id="metadata-title")
+        yield Static(
+            f"[dim]{self.file_path.name}[/dim]  "
+            f"[bold]{len(self.metadata)}[/bold] fields",
+            id="metadata-info",
+        )
+        table = DataTable(id="metadata-table", cursor_type="row", zebra_stripes=True)
+        yield table
+        yield Static("", id="metadata-status")
+        yield Static(
+            "[dim]e: edit  |  a: add  |  d: delete  |  Ctrl+S: save  |  ESC/m: close[/dim]",
+            id="metadata-help",
+        )
 
-            if self.metadata:
-                formatted = json.dumps(self.metadata, indent=2)
-                yield Static(f"\n{formatted}", id="metadata-content")
-            else:
-                yield Static("\n[dim]No metadata found in file[/dim]")
+    def on_mount(self) -> None:
+        table = self.query_one("#metadata-table", DataTable)
+        table.add_column("Key", key="key")
+        table.add_column("Value", key="value")
+        self._rebuild_table()
+        table.focus()
 
-            yield Static("\n[dim]Press ESC or M to close[/dim]")
+    def _rebuild_table(self) -> None:
+        table = self.query_one("#metadata-table", DataTable)
+        table.clear()
+        for i, (k, v) in enumerate(sorted(self.metadata.items())):
+            # Truncate long values for display
+            display_v = v if len(v) <= 120 else v[:117] + "..."
+            table.add_row(k, display_v, key=str(i))
+        info = self.query_one("#metadata-info", Static)
+        dirty = " [yellow]*modified*[/yellow]" if self._dirty else ""
+        info.update(
+            f"[dim]{self.file_path.name}[/dim]  "
+            f"[bold]{len(self.metadata)}[/bold] fields{dirty}"
+        )
+
+    def _selected_key(self) -> str | None:
+        table = self.query_one("#metadata-table", DataTable)
+        if table.cursor_row is None:
+            return None
+        keys = sorted(self.metadata.keys())
+        if table.cursor_row < len(keys):
+            return keys[table.cursor_row]
+        return None
+
+    def action_edit_field(self) -> None:
+        key = self._selected_key()
+        if key is None:
+            return
+        value = self.metadata[key]
+        self.app.push_screen(
+            MetadataFieldEditor(key, value, allow_key_edit=False),
+            self._on_edit_result,
+        )
+
+    def action_add_field(self) -> None:
+        self.app.push_screen(
+            MetadataFieldEditor("", "", allow_key_edit=True),
+            self._on_add_result,
+        )
+
+    def _on_edit_result(self, result: tuple[str, str] | None) -> None:
+        if result is None:
+            return
+        key, value = result
+        self.metadata[key] = value
+        self._dirty = True
+        self._rebuild_table()
+        self.query_one("#metadata-status", Static).update(
+            f"[yellow]Updated '{key}'[/yellow]"
+        )
+
+    def _on_add_result(self, result: tuple[str, str] | None) -> None:
+        if result is None:
+            return
+        key, value = result
+        if not key:
+            self.query_one("#metadata-status", Static).update(
+                "[red]Key cannot be empty[/red]"
+            )
+            return
+        self.metadata[key] = value
+        self._dirty = True
+        self._rebuild_table()
+        self.query_one("#metadata-status", Static).update(
+            f"[yellow]Added '{key}'[/yellow]"
+        )
+
+    def action_delete_field(self) -> None:
+        key = self._selected_key()
+        if key is None:
+            return
+        if key in self.metadata:
+            del self.metadata[key]
+            self._dirty = True
+            self._rebuild_table()
+            self.query_one("#metadata-status", Static).update(
+                f"[yellow]Deleted '{key}'[/yellow]"
+            )
+
+    def action_save(self) -> None:
+        if not self._dirty:
+            self.query_one("#metadata-status", Static).update(
+                "[dim]No changes to save[/dim]"
+            )
+            return
+        status = self.query_one("#metadata-status", Static)
+        status.update("[yellow]Saving...[/yellow]")
+        self.run_worker(lambda: self._do_save(), thread=True)
+
+    def _do_save(self) -> None:
+        import traceback
+
+        try:
+            from sft.data import rewrite_with_metadata
+
+            rewrite_with_metadata(self.file_path, self.index, self.metadata)
+            self._dirty = False
+            self.app.call_from_thread(
+                self.query_one("#metadata-status", Static).update,
+                "[green]Saved successfully[/green]",
+            )
+            self.app.call_from_thread(self._rebuild_table)
+        except Exception:
+            self.app.call_from_thread(
+                self.query_one("#metadata-status", Static).update,
+                f"[red]{traceback.format_exc()}[/red]",
+            )
+
+
+class MetadataFieldEditor(ModalScreen):
+    """Modal for editing a single metadata field."""
+
+    CSS = """
+    MetadataFieldEditor {
+        align: center middle;
+    }
+
+    #field-editor-box {
+        width: 70;
+        height: auto;
+        background: $surface;
+        border: thick $accent;
+        padding: 1 2;
+    }
+
+    #field-editor-title {
+        text-align: center;
+        text-style: bold;
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    .field-label {
+        height: auto;
+        margin-bottom: 0;
+    }
+
+    .field-input {
+        margin-bottom: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, key: str, value: str, allow_key_edit: bool = False) -> None:
+        super().__init__()
+        self.field_key = key
+        self.field_value = value
+        self.allow_key_edit = allow_key_edit
+
+    def compose(self) -> ComposeResult:
+        title = "Add Field" if self.allow_key_edit else f"Edit: {self.field_key}"
+        with Container(id="field-editor-box"):
+            yield Label(title, id="field-editor-title")
+            if self.allow_key_edit:
+                yield Static("[bold]Key:[/bold]", classes="field-label")
+                yield Input(
+                    value=self.field_key,
+                    placeholder="Field name",
+                    id="field-key-input",
+                    classes="field-input",
+                )
+            yield Static("[bold]Value:[/bold]", classes="field-label")
+            yield Input(
+                value=self.field_value if len(self.field_value) <= 500 else self.field_value[:500],
+                placeholder="Field value",
+                id="field-value-input",
+                classes="field-input",
+            )
+            yield Static(
+                "[dim]Enter: save  |  ESC: cancel[/dim]",
+            )
+
+    def on_mount(self) -> None:
+        if self.allow_key_edit:
+            self.query_one("#field-key-input", Input).focus()
+        else:
+            self.query_one("#field-value-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        if self.allow_key_edit and event.input.id == "field-key-input":
+            # Tab to value field
+            self.query_one("#field-value-input", Input).focus()
+            return
+        # Submit
+        if self.allow_key_edit:
+            key = self.query_one("#field-key-input", Input).value.strip()
+        else:
+            key = self.field_key
+        value = self.query_one("#field-value-input", Input).value
+        self.dismiss((key, value))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class FilterScreen(ModalScreen):
@@ -906,6 +1126,145 @@ class CompactifyScreen(ModalScreen):
             )
 
 
+class ScaleScreen(ModalScreen):
+    """Modal screen for scaling LoRA pairs by a coefficient."""
+
+    CSS = """
+    ScaleScreen {
+        align: center middle;
+    }
+
+    #scale-box {
+        width: 60;
+        height: auto;
+        background: $surface;
+        border: thick $warning;
+        padding: 1 2;
+    }
+
+    #scale-title {
+        text-align: center;
+        text-style: bold;
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    #scale-info {
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    #scale-input {
+        margin-bottom: 1;
+    }
+
+    #scale-status {
+        height: auto;
+    }
+
+    #scale-help {
+        height: auto;
+        dock: bottom;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Cancel"),
+    ]
+
+    def __init__(
+        self,
+        pairs: list[LoraPair],
+        file_path: Path,
+        index: TensorIndex,
+    ) -> None:
+        super().__init__()
+        self.pairs = pairs
+        self.file_path = file_path
+        self.index = index
+
+    def compose(self) -> ComposeResult:
+        with Container(id="scale-box"):
+            yield Label("Scale LoRA", id="scale-title")
+            yield Static(
+                f"[bold]{len(self.pairs)}[/bold] pairs  |  "
+                f"Scales all lora_A tensors by alpha.\n"
+                f"delta_W = B @ (alpha * A) = alpha * delta_W",
+                id="scale-info",
+            )
+            yield Input(
+                placeholder="Alpha (e.g. 1.3, 0.5)",
+                id="scale-input",
+            )
+            yield Static("", id="scale-status")
+            yield Static(
+                "[dim]Enter: run  |  ESC: cancel[/dim]",
+                id="scale-help",
+            )
+
+    def on_mount(self) -> None:
+        self.query_one("#scale-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        status = self.query_one("#scale-status", Static)
+        raw = event.value.strip()
+
+        try:
+            alpha = float(raw)
+        except ValueError:
+            status.update("[red]Enter a number (e.g. 1.3, 0.5)[/red]")
+            return
+
+        if alpha == 0:
+            status.update("[red]Alpha cannot be zero[/red]")
+            return
+
+        status.update(f"[yellow]Scaling {len(self.pairs)} pairs by {alpha}...[/yellow]")
+        self.query_one("#scale-input", Input).disabled = True
+        self.run_worker(lambda: self._do_scale(alpha), thread=True)
+
+    def _do_scale(self, alpha: float) -> None:
+        import traceback
+
+        from sft.data import scale_lora_a, write_safetensors
+
+        try:
+            all_tensors = scale_lora_a(
+                self.file_path, self.index, self.pairs, alpha,
+            )
+            tensor_order = [t.full_name for t in self.index.tensors]
+
+            # Name: foo.safetensors -> foo_x1.3.safetensors
+            alpha_str = f"{alpha:g}"
+            out_path = self.file_path.parent / f"{self.file_path.stem}_x{alpha_str}.safetensors"
+
+            self.app.call_from_thread(
+                self.query_one("#scale-status", Static).update,
+                "[yellow]Writing file...[/yellow]",
+            )
+            write_safetensors(
+                out_path,
+                all_tensors,
+                tensor_order,
+                self.index.metadata if self.index.metadata else None,
+            )
+
+            self.app.call_from_thread(
+                self.query_one("#scale-status", Static).update,
+                f"[green]Saved {out_path.name}[/green]",
+            )
+            self.app.call_from_thread(
+                self.app.notify,
+                f"Saved {out_path.name} (alpha={alpha_str})",
+            )
+        except Exception:
+            self.app.call_from_thread(
+                self.query_one("#scale-status", Static).update,
+                f"[red]{traceback.format_exc()}[/red]",
+            )
+
+
 class LoraScreen(ModalScreen):
     """Modal screen showing LoRA pair analysis with a DataTable."""
 
@@ -945,6 +1304,7 @@ class LoraScreen(ModalScreen):
         Binding("enter", "open_svd", "SVD", priority=True),
         Binding("s", "cycle_sort", "Sort"),
         Binding("c", "compactify", "Compactify"),
+        Binding("a", "scale_lora", "Scale"),
         Binding("question_mark", "show_help", "Help"),
         Binding("e", "export_json", "Export"),
     ]
@@ -987,7 +1347,7 @@ class LoraScreen(ModalScreen):
         table = DataTable(id="lora-pair-table", cursor_type="row", zebra_stripes=True)
         yield table
         yield Static(
-            "[dim]↑/↓ select  |  Enter: SVD  |  s: sort  |  c: compactify  |  e: export  |  ?: help  |  ESC/L: close[/dim]",
+            "[dim]↑/↓ select  |  Enter: SVD  |  s: sort  |  c: compactify  |  a: scale  |  e: export  |  ?: help  |  ESC/L: close[/dim]",
             id="lora-help",
         )
 
@@ -1165,6 +1525,12 @@ class LoraScreen(ModalScreen):
         """Open compactify screen."""
         self.app.push_screen(
             CompactifyScreen(self.pairs, self.file_path, self.index)
+        )
+
+    def action_scale_lora(self) -> None:
+        """Open scale LoRA screen."""
+        self.app.push_screen(
+            ScaleScreen(self.pairs, self.file_path, self.index)
         )
 
     def action_show_help(self) -> None:
@@ -1655,6 +2021,8 @@ class SftApp(App):
                     cached["norm_b"] = float(entry["norm_b"])
                 if "eff_rank" in entry:
                     cached["eff_rank"] = float(entry["eff_rank"])
+                if "sigma0" in entry:
+                    cached["sigma0"] = float(entry["sigma0"])
                 if cached:
                     self._lora_stats_cache[name] = cached
         except Exception:
@@ -1807,9 +2175,9 @@ class SftApp(App):
             self.push_screen(TensorDetailScreen(tensor, lora_info))
 
     def action_show_metadata(self) -> None:
-        """Show file metadata popup."""
+        """Show file metadata editor."""
         if self.index:
-            self.push_screen(MetadataScreen(self.index.metadata, self.file_path))
+            self.push_screen(MetadataScreen(self.index.metadata, self.file_path, self.index))
 
     def action_show_lora(self) -> None:
         """Show LoRA analysis, filtered to visible tensors. Single match → SVD directly."""

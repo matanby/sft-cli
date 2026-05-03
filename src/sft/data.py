@@ -264,6 +264,54 @@ def _cast_to_dtype(arr: np.ndarray, dtype: str) -> np.ndarray:
         return arr
 
 
+def rewrite_with_metadata(
+    file_path: Path,
+    index: TensorIndex,
+    metadata: dict[str, str],
+) -> None:
+    """Rewrite a safetensors file in-place with updated metadata.
+
+    Loads all tensors, then writes back with the new metadata dict.
+    """
+    all_tensors = load_all_tensors(file_path, index)
+    tensor_order = [t.full_name for t in index.tensors]
+    write_safetensors(file_path, all_tensors, tensor_order, metadata or None)
+
+
+def scale_lora_a(
+    file_path: Path,
+    index: TensorIndex,
+    pairs: list,
+    alpha: float,
+) -> dict[str, tuple[np.ndarray, str]]:
+    """Scale all lora_A tensors by alpha, returning modified tensor dict.
+
+    delta_W = B @ (alpha * A) = alpha * (B @ A), so scaling A scales the
+    entire LoRA contribution uniformly.
+
+    Returns dict of name -> (ndarray, dtype_string) ready for write_safetensors.
+    """
+    all_tensors = load_all_tensors(file_path, index)
+
+    for pair in pairs:
+        a_name = pair.a_tensor_name
+        arr, dtype_str = all_tensors[a_name]
+
+        # Convert to float32 for scaling, then cast back
+        if dtype_str == "BF16":
+            f32 = arr.astype(np.uint32) << 16
+            f32 = f32.view(np.float32)
+        elif dtype_str == "F16":
+            f32 = arr.astype(np.float32)
+        else:
+            f32 = arr.astype(np.float32)
+
+        f32 = f32 * alpha
+        all_tensors[a_name] = (_cast_to_dtype(f32, dtype_str), dtype_str)
+
+    return all_tensors
+
+
 def load_all_tensors(
     file_path: Path, index: TensorIndex,
 ) -> dict[str, tuple[np.ndarray, str]]:

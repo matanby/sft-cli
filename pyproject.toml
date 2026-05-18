@@ -35,7 +35,7 @@ dependencies = [
 torch = ["torch>=2.0"]
 
 [project.scripts]
-sft = "sft.cli:app"
+sft = "sft.cli:_entry"
 
 [project.urls]
 Homepage = "https://github.com/matanby/sft-cli"

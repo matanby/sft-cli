@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import typer
@@ -154,5 +155,21 @@ def check(
     run(file, skip_values=skip_values)
 
 
-if __name__ == "__main__":
+def _entry() -> None:
+    """Console-script entry point.
+
+    If the first positional arg looks like a .safetensors path (not a known
+    subcommand), auto-insert ``browse`` so ``sft model.safetensors`` just works.
+    """
+    args = sys.argv[1:]
+    if (
+        args
+        and not args[0].startswith("-")
+        and args[0].lower().endswith(".safetensors")
+    ):
+        sys.argv.insert(1, "browse")
     app()
+
+
+if __name__ == "__main__":
+    _entry()

@@ -18,7 +18,7 @@ lora_app = typer.Typer(
 app.add_typer(lora_app, name="lora", rich_help_panel="LoRA")
 
 
-@lora_app.command("extract")
+@lora_app.command("extract", no_args_is_help=True)
 def lora_extract_cmd(
     base: Path = typer.Argument(
         ...,
@@ -58,7 +58,16 @@ def lora_extract_cmd(
         help="Glob pattern for tensor names to exclude.",
     ),
 ) -> None:
-    """Extract a LoRA adapter from the delta between base and fine-tuned models."""
+    """Extract a LoRA adapter from the delta between base and fine-tuned models.
+
+    Computes low-rank approximation of (finetuned - base) weight deltas
+    using SVD decomposition.
+
+    Examples:
+      sft lora extract base.safetensors finetuned.safetensors --rank 16
+      sft lora extract base.safetensors ft.safetensors -r 64 -o adapter.safetensors
+      sft lora extract base.safetensors ft.safetensors -r 32 --include='*self_attn*'
+    """
     base = validate_safetensors(base)
     finetuned = validate_safetensors(finetuned)
 
@@ -87,7 +96,7 @@ def lora_extract_cmd(
     typer.echo(f"\nWrote {result.output_path}")
 
 
-@lora_app.command("info")
+@lora_app.command("info", no_args_is_help=True)
 def lora_info_cmd(
     file: Path = typer.Argument(
         ...,
@@ -96,7 +105,14 @@ def lora_info_cmd(
     ),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON."),
 ) -> None:
-    """Analyze a LoRA adapter file."""
+    """Analyze a LoRA adapter file.
+
+    Shows rank, alpha, target modules, layer count, and per-pair shapes.
+
+    Examples:
+      sft lora info adapter.safetensors
+      sft lora info adapter.safetensors --json
+    """
     file = validate_safetensors(file)
 
     from sft.ops.lora.info import lora_info
@@ -145,7 +161,7 @@ def lora_info_cmd(
         )
 
 
-@lora_app.command("resize")
+@lora_app.command("resize", no_args_is_help=True)
 def lora_resize_cmd(
     file: Path = typer.Argument(
         ...,
@@ -166,7 +182,14 @@ def lora_resize_cmd(
         resolve_path=True,
     ),
 ) -> None:
-    """Reduce LoRA rank via truncated SVD."""
+    """Reduce LoRA rank via truncated SVD.
+
+    Keeps the top singular values/vectors, discarding the rest.
+
+    Examples:
+      sft lora resize adapter.safetensors --rank 8
+      sft lora resize adapter.safetensors -r 16 -o smaller.safetensors
+    """
     file = validate_safetensors(file)
 
     from sft.ops.lora.resize import resize_lora
@@ -188,7 +211,7 @@ def lora_resize_cmd(
     typer.echo(f"Written to: {dst}")
 
 
-@lora_app.command("add")
+@lora_app.command("add", no_args_is_help=True)
 def lora_add_cmd(
     files: list[Path] = typer.Argument(
         ...,
@@ -219,7 +242,15 @@ def lora_add_cmd(
         help="Show what would be combined without writing.",
     ),
 ) -> None:
-    """Combine LoRA adapters via weighted task arithmetic."""
+    """Combine LoRA adapters via weighted task arithmetic.
+
+    Adds multiple LoRA deltas together with optional per-adapter weights.
+
+    Examples:
+      sft lora add style.safetensors content.safetensors -o combined.safetensors
+      sft lora add a.safetensors b.safetensors -w 0.7 -w 0.3
+      sft lora add a.safetensors b.safetensors --rank 16 --dry-run
+    """
     for f in files:
         validate_safetensors(f)
 
@@ -251,7 +282,7 @@ def lora_add_cmd(
     typer.echo(f"Output: {result.output_path}")
 
 
-@lora_app.command("svd")
+@lora_app.command("svd", no_args_is_help=True)
 def lora_svd_cmd(
     file: Path = typer.Argument(
         ...,
@@ -266,7 +297,16 @@ def lora_svd_cmd(
     ),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON."),
 ) -> None:
-    """Analyze the singular value spectrum of LoRA matrices."""
+    """Analyze the singular value spectrum of LoRA matrices.
+
+    Shows how many singular values are needed to capture 90/95/99% of
+    variance, helping decide if a lower rank is viable.
+
+    Examples:
+      sft lora svd adapter.safetensors
+      sft lora svd adapter.safetensors --threshold 0.99
+      sft lora svd adapter.safetensors --json
+    """
     file = validate_safetensors(file)
 
     from sft.ops.lora.svd import analyze_svd
@@ -310,7 +350,7 @@ def lora_svd_cmd(
     typer.echo(f"Suggested rank: captures {analysis.threshold:.0%} of variance.")
 
 
-@lora_app.command("compat")
+@lora_app.command("compat", no_args_is_help=True)
 def lora_compat_cmd(
     base: Path = typer.Argument(
         ...,
@@ -323,7 +363,13 @@ def lora_compat_cmd(
         resolve_path=True,
     ),
 ) -> None:
-    """Check if a LoRA adapter is compatible with a base model."""
+    """Check if a LoRA adapter is compatible with a base model.
+
+    Verifies that target modules exist in the base model and shapes align.
+
+    Examples:
+      sft lora compat base.safetensors adapter.safetensors
+    """
     base = validate_safetensors(base)
     adapter = validate_safetensors(adapter)
 
@@ -365,7 +411,7 @@ def lora_compat_cmd(
         raise typer.Exit(code=1)
 
 
-@lora_app.command("merge")
+@lora_app.command("merge", no_args_is_help=True)
 def lora_merge_cmd(
     base: Path = typer.Argument(
         ...,
@@ -394,7 +440,15 @@ def lora_merge_cmd(
         help="Show which tensors would be modified without writing.",
     ),
 ) -> None:
-    """Merge a LoRA adapter into a base model."""
+    """Merge a LoRA adapter into a base model.
+
+    Applies W' = W + scale * (B @ A) for each target module.
+
+    Examples:
+      sft lora merge base.safetensors adapter.safetensors
+      sft lora merge base.safetensors adapter.safetensors --scale 0.5
+      sft lora merge base.safetensors adapter.safetensors -o merged.safetensors --dry-run
+    """
     base = validate_safetensors(base)
     adapter = validate_safetensors(adapter)
 

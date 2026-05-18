@@ -10,7 +10,7 @@ from sft.cli import app, validate_safetensors
 from sft.ops.slice import slice_file
 
 
-@app.command("slice", rich_help_panel="Transform")
+@app.command("slice", rich_help_panel="Transform", no_args_is_help=True)
 def slice_cmd(
     file: Path = typer.Argument(
         ...,
@@ -39,7 +39,16 @@ def slice_cmd(
         help="Show what would be included/removed without writing.",
     ),
 ) -> None:
-    """Extract tensors matching a pattern into a new file."""
+    """Extract tensors matching a pattern into a new file.
+
+    Use --include to keep only matching tensors, --exclude to remove
+    matching tensors, or both to include first then exclude.
+
+    Examples:
+      sft slice model.safetensors --include='**.weight'
+      sft slice model.safetensors --exclude='**.bias' -o no_bias.safetensors
+      sft slice model.safetensors --include='model.layers.0.**' --dry-run
+    """
     file = validate_safetensors(file)
 
     if include is None and exclude is None:

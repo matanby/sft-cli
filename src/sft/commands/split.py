@@ -10,7 +10,7 @@ from sft.cli import app, validate_safetensors
 from sft.ops.split import parse_size, split_file
 
 
-@app.command("split", rich_help_panel="Transform")
+@app.command("split", rich_help_panel="Transform", no_args_is_help=True)
 def split(
     file: Path = typer.Argument(
         ...,
@@ -35,7 +35,16 @@ def split(
         help="Show shard distribution without writing files.",
     ),
 ) -> None:
-    """Split a .safetensors file into smaller shards by size."""
+    """Split a .safetensors file into smaller shards by size.
+
+    Creates numbered shard files and a JSON index file.
+    Size format: number followed by B, KB, MB, or GB.
+
+    Examples:
+      sft split model.safetensors --max-size 4GB
+      sft split model.safetensors --max-size 500MB --dry-run
+      sft split model.safetensors --max-size 2GB -o 'shard-{index}.safetensors'
+    """
     file = validate_safetensors(file)
 
     try:

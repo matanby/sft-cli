@@ -12,7 +12,7 @@ from sft.utils.dtypes import VALID_DTYPES
 from sft.utils.output import resolve_output
 
 
-@app.command("cast", rich_help_panel="Transform")
+@app.command("cast", rich_help_panel="Transform", no_args_is_help=True)
 def cast(
     file: Path = typer.Argument(
         ...,
@@ -46,7 +46,16 @@ def cast(
         help="Show what would be cast without writing.",
     ),
 ) -> None:
-    """Cast tensor dtypes in a .safetensors file."""
+    """Cast tensor dtypes in a .safetensors file.
+
+    Convert all (or selected) tensors to a different dtype. Useful for
+    quantising models to fp16/bf16 or promoting to fp32.
+
+    Examples:
+      sft cast model.safetensors --dtype fp16
+      sft cast model.safetensors --dtype bf16 --exclude='*.norm.*'
+      sft cast model.safetensors --dtype fp32 --include='**.weight' --dry-run
+    """
     file = validate_safetensors(file)
     dst = resolve_output(output, file, dtype)
 

@@ -10,7 +10,7 @@ from sft.cli import app, validate_safetensors
 from sft.ops.cat import cat_files
 
 
-@app.command("cat", rich_help_panel="Transform")
+@app.command("cat", rich_help_panel="Transform", no_args_is_help=True)
 def cat(
     files: list[Path] = typer.Argument(
         ...,
@@ -34,7 +34,16 @@ def cat(
         help="Show what the merged file would contain without writing.",
     ),
 ) -> None:
-    """Merge multiple .safetensors files into one."""
+    """Merge multiple .safetensors files into one.
+
+    Concatenates tensors from all input files. Fails on name collisions
+    unless --allow-duplicates is set (last file wins).
+
+    Examples:
+      sft cat shard_01.safetensors shard_02.safetensors -o merged.safetensors
+      sft cat *.safetensors --allow-duplicates
+      sft cat part1.safetensors part2.safetensors --dry-run
+    """
     validated = [validate_safetensors(f) for f in files]
 
     try:

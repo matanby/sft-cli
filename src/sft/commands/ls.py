@@ -75,7 +75,7 @@ def _to_json(rows: list[FileSummaryRow]) -> None:
     typer.echo(json.dumps(data, indent=2))
 
 
-@app.command(rich_help_panel="Inspect")
+@app.command(rich_help_panel="Inspect", no_args_is_help=True)
 def ls(
     files: list[Path] = typer.Argument(
         ...,
@@ -93,7 +93,15 @@ def ls(
         help="Sort rows by: name, size, params, tensors.",
     ),
 ) -> None:
-    """Print a tabular summary of one or more .safetensors files."""
+    """Print a tabular summary of one or more .safetensors files.
+
+    Shows tensor count, parameter count, file size, and dtypes for each file.
+
+    Examples:
+      sft ls model.safetensors
+      sft ls *.safetensors --sort=size
+      sft ls shard_*.safetensors --json
+    """
     validated = [validate_safetensors(f) for f in files]
     rows = list_files(validated)
 

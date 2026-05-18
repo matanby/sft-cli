@@ -10,7 +10,7 @@ from sft.cli import app, validate_safetensors
 from sft.ops.slice import strip_file
 
 
-@app.command("strip", rich_help_panel="Transform")
+@app.command("strip", rich_help_panel="Transform", no_args_is_help=True)
 def strip_cmd(
     file: Path = typer.Argument(
         ...,
@@ -34,7 +34,18 @@ def strip_cmd(
         help="Show what would be included/removed without writing.",
     ),
 ) -> None:
-    """Remove tensors matching a pattern from a file."""
+    """Remove tensors matching a pattern from a file.
+
+    Glob patterns:
+      *name*       matches any tensor containing "name"
+      **.weight    matches tensors ending with ".weight" at any depth
+      model.*.*    matches exactly two segments under "model"
+
+    Examples:
+      sft strip model.safetensors --exclude='*lora_A*'
+      sft strip model.safetensors --exclude='**.bias' -o slim.safetensors
+      sft strip model.safetensors --exclude='*lora_A*' --dry-run
+    """
     file = validate_safetensors(file)
 
     result = strip_file(file, output, exclude=exclude, dry_run=dry_run)

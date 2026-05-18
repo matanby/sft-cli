@@ -10,7 +10,7 @@ from sft.cli import app, validate_safetensors
 from sft.ops.tree import render_tree
 
 
-@app.command("tree", rich_help_panel="Inspect")
+@app.command("tree", rich_help_panel="Inspect", no_args_is_help=True)
 def tree_cmd(
     file: Path = typer.Argument(
         ...,
@@ -24,7 +24,14 @@ def tree_cmd(
         help="Limit tree depth.",
     ),
 ) -> None:
-    """Print tensor namespace hierarchy as an ASCII tree."""
+    """Print tensor namespace hierarchy as an ASCII tree.
+
+    Tensor names are split on '.' to form a directory-like structure.
+
+    Examples:
+      sft tree model.safetensors
+      sft tree model.safetensors --depth 3
+    """
     file = validate_safetensors(file)
     output = render_tree(file, max_depth=depth)
     typer.echo(output)

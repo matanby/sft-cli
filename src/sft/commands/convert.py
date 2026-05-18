@@ -9,7 +9,7 @@ import typer
 from sft.cli import app
 
 
-@app.command("convert", rich_help_panel="Convert")
+@app.command("convert", rich_help_panel="Convert", no_args_is_help=True)
 def convert(
     file: Path = typer.Argument(
         ...,
@@ -28,7 +28,15 @@ def convert(
         help="Cast tensors to this dtype during conversion (e.g. fp16, fp32).",
     ),
 ) -> None:
-    """Convert a PyTorch checkpoint file to safetensors format."""
+    """Convert a PyTorch checkpoint file to safetensors format.
+
+    Supports .pt, .pth, and .bin files. Requires PyTorch to be installed.
+
+    Examples:
+      sft convert model.pt
+      sft convert checkpoint.bin -o model.safetensors
+      sft convert model.pth --dtype fp16
+    """
     if not file.exists():
         typer.secho(f"Error: File not found: {file}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)

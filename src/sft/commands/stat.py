@@ -75,7 +75,7 @@ def _print_json(stats_list) -> None:
     typer.echo(json.dumps(data, indent=2))
 
 
-@app.command("stat", rich_help_panel="Inspect")
+@app.command("stat", rich_help_panel="Inspect", no_args_is_help=True)
 def stat(
     file: Path = typer.Argument(
         ...,
@@ -103,7 +103,16 @@ def stat(
         help="Exit code 1 if any NaN or Inf found.",
     ),
 ) -> None:
-    """Compute per-tensor statistics (mean, std, min, max, sparsity, NaN/Inf)."""
+    """Compute per-tensor statistics (mean, std, min, max, sparsity, NaN/Inf).
+
+    Useful for sanity-checking model weights or detecting corruption.
+    Use --check in CI to fail on NaN/Inf values.
+
+    Examples:
+      sft stat model.safetensors
+      sft stat model.safetensors --include='*lora*' --json
+      sft stat model.safetensors --check
+    """
     file = validate_safetensors(file)
     results = compute_stats(file, include=include, exclude=exclude)
 

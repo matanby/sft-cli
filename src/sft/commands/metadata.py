@@ -20,7 +20,7 @@ def _parse_key_value(raw: str) -> tuple[str, str]:
     return key, value
 
 
-@app.command("metadata", rich_help_panel="Transform")
+@app.command("metadata", rich_help_panel="Transform", no_args_is_help=True)
 def metadata(
     file: Path = typer.Argument(
         ...,
@@ -49,7 +49,17 @@ def metadata(
         help="Output path (default: {stem}.metadata.safetensors).",
     ),
 ) -> None:
-    """View or edit metadata in a .safetensors file."""
+    """View or edit metadata in a .safetensors file.
+
+    Without --set or --unset, prints existing metadata. With --set/--unset,
+    writes a new file with updated metadata.
+
+    Examples:
+      sft metadata model.safetensors
+      sft metadata model.safetensors --json
+      sft metadata model.safetensors --set format=pt --set version=2.0
+      sft metadata model.safetensors --unset format
+    """
     file = validate_safetensors(file)
 
     is_write = bool(set_pairs) or bool(unset_keys)

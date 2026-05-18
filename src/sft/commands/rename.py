@@ -11,7 +11,7 @@ from sft.ops.rename import rename_tensors
 from sft.utils.output import resolve_output
 
 
-@app.command("rename", rich_help_panel="Transform")
+@app.command("rename", rich_help_panel="Transform", no_args_is_help=True)
 def rename(
     file: Path = typer.Argument(
         ...,
@@ -35,7 +35,16 @@ def rename(
         help="Show old → new name mappings without writing.",
     ),
 ) -> None:
-    """Rename tensor keys using regex substitution."""
+    """Rename tensor keys using regex substitution.
+
+    Each --sub takes a PATTERN and REPLACEMENT pair (Python regex syntax).
+    Multiple --sub options can be chained.
+
+    Examples:
+      sft rename model.safetensors --sub 'model\\.layers' 'layers' --dry-run
+      sft rename model.safetensors --sub 'base_model\\.model\\.' ''
+      sft rename model.safetensors --sub 'lora_A' 'lora_down' --sub 'lora_B' 'lora_up'
+    """
     file = validate_safetensors(file)
 
     if len(sub) == 0:

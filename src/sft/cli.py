@@ -54,7 +54,7 @@ def validate_safetensors(path: Path) -> Path:
     return path
 
 
-@app.command(rich_help_panel="Inspect")
+@app.command(rich_help_panel="Inspect", no_args_is_help=True)
 def browse(
     file: Path = typer.Argument(
         ...,
@@ -62,7 +62,15 @@ def browse(
         resolve_path=True,
     ),
 ) -> None:
-    """Open an interactive TUI browser for a .safetensors file."""
+    """Open an interactive TUI browser for a .safetensors file.
+
+    Launches a full-screen terminal UI for exploring tensor names,
+    shapes, dtypes, and values. Navigate with arrow keys, filter with '/'.
+
+    Examples:
+      sft browse model.safetensors
+      sft model.safetensors              (shorthand — browse is the default)
+    """
     file = validate_safetensors(file)
     from sft.browser import SftApp
 
@@ -82,7 +90,7 @@ def browse_alias(
     browse(file)
 
 
-@app.command(rich_help_panel="Inspect")
+@app.command(rich_help_panel="Inspect", no_args_is_help=True)
 def info(
     file: Path = typer.Argument(
         ...,
@@ -95,7 +103,14 @@ def info(
         help="Output as JSON.",
     ),
 ) -> None:
-    """Print a non-interactive summary of a .safetensors file."""
+    """Print a non-interactive summary of a .safetensors file.
+
+    Shows file size, tensor count, dtype distribution, and metadata.
+
+    Examples:
+      sft info model.safetensors
+      sft info model.safetensors --json
+    """
     file = validate_safetensors(file)
     from sft.commands.info import run
 
@@ -135,7 +150,7 @@ import sft.commands.strip  # noqa: F401, E402
 import sft.commands.tree  # noqa: F401, E402
 
 
-@app.command(rich_help_panel="Inspect")
+@app.command(rich_help_panel="Inspect", no_args_is_help=True)
 def check(
     file: Path = typer.Argument(
         ...,
@@ -148,7 +163,15 @@ def check(
         help="Skip NaN/Inf scan (faster for huge files).",
     ),
 ) -> None:
-    """Validate a .safetensors file's integrity and check for NaN/Inf values."""
+    """Validate a .safetensors file's integrity and check for NaN/Inf values.
+
+    Reads the full file to verify all tensors are loadable. Exits with
+    code 1 if corruption or bad values are detected.
+
+    Examples:
+      sft check model.safetensors
+      sft check model.safetensors --skip-values
+    """
     file = validate_safetensors(file)
     from sft.commands.check import run
 

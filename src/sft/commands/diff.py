@@ -96,7 +96,7 @@ def _to_json(diff: TensorDiff) -> None:
     typer.echo(json.dumps(data, indent=2))
 
 
-@app.command("diff", rich_help_panel="Transform")
+@app.command("diff", rich_help_panel="Transform", no_args_is_help=True)
 def diff_cmd(
     file_a: Path = typer.Argument(
         ...,
@@ -129,7 +129,16 @@ def diff_cmd(
         help="Glob pattern to exclude tensors.",
     ),
 ) -> None:
-    """Compare two .safetensors files and show structural or value differences."""
+    """Compare two .safetensors files and show structural or value differences.
+
+    Shows added/removed tensors, shape changes, and dtype changes.
+    Use --delta for numerical comparison (L2 norm, cosine similarity).
+
+    Examples:
+      sft diff base.safetensors finetuned.safetensors
+      sft diff v1.safetensors v2.safetensors --delta
+      sft diff a.safetensors b.safetensors --include='**.weight' --json
+    """
     file_a = validate_safetensors(file_a)
     file_b = validate_safetensors(file_b)
 

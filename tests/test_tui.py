@@ -536,3 +536,110 @@ def test_diff_rejects_same_file(lora_adapter: Path) -> None:
             assert isinstance(app.screen, DiffFilePickerScreen)
 
     asyncio.run(_run())
+
+
+# --- Visual sizing regression tests ---
+#
+# The main browser uses a 2-column grid layout on `Screen`. Without an
+# explicit override, that rule bleeds into every ModalScreen pushed on
+# top of the app, crushing each modal into ~1/3 of the viewport width.
+# These tests pin the modal widths to a sensible fraction of the screen
+# so the regression can't sneak back in.
+
+
+def _modal_container_fills(
+    file_path: Path,
+    key: str,
+    container_selector: str,
+    min_fraction: float,
+    screen_size: tuple[int, int] = (100, 30),
+) -> int:
+    """Open a modal via `key` and return the actual width of its container.
+
+    Asserts the container width is at least `min_fraction` of the screen
+    width — i.e. the App-level grid layout is not leaking into modals.
+    """
+    from sft.browser import SftApp
+
+    width_holder: list[int] = []
+
+    async def _run() -> None:
+        app = SftApp(file_path)
+        async with app.run_test(size=screen_size) as pilot:
+            await pilot.press(key)
+            for _ in range(15):
+                await pilot.pause()
+                try:
+                    container = app.screen.query_one(container_selector)
+                    if container.size.width > 0:
+                        break
+                except Exception:
+                    continue
+            container = app.screen.query_one(container_selector)
+            width_holder.append(container.size.width)
+
+    asyncio.run(_run())
+    width = width_holder[0]
+    assert width >= int(screen_size[0] * min_fraction), (
+        f"{container_selector} only {width}/{screen_size[0]} cols wide — "
+        f"app-level grid is probably leaking into modals"
+    )
+    return width
+
+
+def test_metadata_modal_fills_screen(lora_adapter: Path) -> None:
+    _modal_container_fills(lora_adapter, "m", "#metadata-container", 0.7)
+
+
+def test_lora_info_modal_fills_screen(lora_adapter: Path) -> None:
+    """LoRA Info modal (via L then i) must use most of the screen width."""
+    from sft.browser import LoraInfoScreen, LoraModeScreen, SftApp
+
+    async def _run() -> None:
+        app = SftApp(lora_adapter)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.press("L")
+            for _ in range(15):
+                await pilot.pause()
+                if isinstance(app.screen, LoraModeScreen):
+                    break
+            await pilot.press("i")
+            for _ in range(15):
+                await pilot.pause()
+                if isinstance(app.screen, LoraInfoScreen):
+                    break
+            container = app.screen.query_one("#lora-info-container")
+            assert container.size.width >= 80, (
+                f"lora-info-container only {container.size.width} cols wide"
+            )
+
+    asyncio.run(_run())
+
+
+def test_svd_spectrum_chart_uses_available_width(lora_adapter: Path) -> None:
+    """The SVD bar chart should adapt to the modal width, not stay at 40."""
+    from sft.browser import LoraModeScreen, SftApp, SvdSpectrumScreen
+
+    async def _run() -> None:
+        app = SftApp(lora_adapter)
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.press("L")
+            for _ in range(30):
+                await pilot.pause()
+                if isinstance(app.screen, LoraModeScreen) and len(
+                    app.screen._stats
+                ) == len(app.screen.lora_info.pairs):
+                    break
+            await pilot.press("enter")
+            for _ in range(15):
+                await pilot.pause()
+                if isinstance(app.screen, SvdSpectrumScreen):
+                    break
+            for _ in range(5):
+                await pilot.pause()
+            container = app.screen.query_one("#svd-container")
+            assert container.size.width >= 100, (
+                f"svd-container only {container.size.width} cols wide"
+            )
+
+    asyncio.run(_run())

@@ -72,7 +72,9 @@ class MetadataScreen(ModalScreen):
     }
 
     #metadata-container {
-        width: 70;
+        width: 80%;
+        max-width: 120;
+        min-width: 60;
         height: auto;
         max-height: 80%;
         background: $surface;
@@ -87,11 +89,13 @@ class MetadataScreen(ModalScreen):
     }
 
     #metadata-scroll {
+        height: auto;
         max-height: 60vh;
     }
 
     #metadata-content {
         height: auto;
+        width: auto;
     }
     """
 
@@ -129,7 +133,9 @@ class TensorStatsScreen(ModalScreen):
     }
 
     #stats-container {
-        width: 65;
+        width: 70%;
+        max-width: 120;
+        min-width: 60;
         height: auto;
         max-height: 80%;
         background: $surface;
@@ -729,18 +735,28 @@ class LoraSortMode(Enum):
     """Sort modes for the LoRA Analysis table."""
 
     MODULE_ASC = "module ↑"
+    MODULE_DESC = "module ↓"
     RANK_DESC = "rank ↓"
+    RANK_ASC = "rank ↑"
     EFF_RANK_DESC = "eff. rank ↓"
+    EFF_RANK_ASC = "eff. rank ↑"
     NORM_A_DESC = "‖A‖ ↓"
+    NORM_A_ASC = "‖A‖ ↑"
     NORM_B_DESC = "‖B‖ ↓"
+    NORM_B_ASC = "‖B‖ ↑"
 
 
 LORA_SORT_ORDER = [
     LoraSortMode.MODULE_ASC,
+    LoraSortMode.MODULE_DESC,
     LoraSortMode.RANK_DESC,
+    LoraSortMode.RANK_ASC,
     LoraSortMode.EFF_RANK_DESC,
+    LoraSortMode.EFF_RANK_ASC,
     LoraSortMode.NORM_A_DESC,
+    LoraSortMode.NORM_A_ASC,
     LoraSortMode.NORM_B_DESC,
+    LoraSortMode.NORM_B_ASC,
 ]
 
 
@@ -753,7 +769,9 @@ class KohyaConvertScreen(ModalScreen):
     }
 
     #kohya-container {
-        width: 70;
+        width: 75%;
+        max-width: 120;
+        min-width: 60;
         height: auto;
         max-height: 80%;
         background: $surface;
@@ -861,8 +879,9 @@ class DiffFilePickerScreen(ModalScreen):
     }
 
     #picker-container {
-        width: 80%;
-        height: 80%;
+        width: 90%;
+        height: 85%;
+        min-width: 50;
         background: $surface;
         border: thick $accent;
         padding: 1 2;
@@ -968,11 +987,13 @@ class DiffResultScreen(ModalScreen):
     #diff-summary {
         color: $text-muted;
         height: auto;
+        width: 100%;
         margin-bottom: 1;
     }
 
     #diff-table {
         height: 1fr;
+        width: 100%;
     }
 
     #diff-footer {
@@ -1113,11 +1134,13 @@ class LoraModeScreen(Screen):
 
     #lora-body {
         height: 1fr;
+        width: 100%;
         padding: 1 2;
     }
 
     #lora-table {
         height: 1fr;
+        width: 100%;
     }
 
     #lora-kohya-notice {
@@ -1185,10 +1208,49 @@ class LoraModeScreen(Screen):
                     id="lora-kohya-notice",
                 )
 
+    _LORA_BASE_LABELS: dict[str, str] = {
+        "module": "Module",
+        "rank": "Rank",
+        "eff_rank": "Eff. Rank",
+        "sv95": "SV95",
+        "norm_a": "‖A‖",
+        "norm_b": "‖B‖",
+    }
+
+    _LORA_SORT_COLUMN_MAP: dict[LoraSortMode, tuple[str, str]] = {
+        LoraSortMode.MODULE_ASC: ("module", " ↑"),
+        LoraSortMode.MODULE_DESC: ("module", " ↓"),
+        LoraSortMode.RANK_DESC: ("rank", " ↓"),
+        LoraSortMode.RANK_ASC: ("rank", " ↑"),
+        LoraSortMode.EFF_RANK_DESC: ("eff_rank", " ↓"),
+        LoraSortMode.EFF_RANK_ASC: ("eff_rank", " ↑"),
+        LoraSortMode.NORM_A_DESC: ("norm_a", " ↓"),
+        LoraSortMode.NORM_A_ASC: ("norm_a", " ↑"),
+        LoraSortMode.NORM_B_DESC: ("norm_b", " ↓"),
+        LoraSortMode.NORM_B_ASC: ("norm_b", " ↑"),
+    }
+
     def on_mount(self) -> None:
         if self.lora_format == "peft" and self.lora_info:
             table = self.query_one("#lora-table", DataTable)
-            table.add_columns("Module", "Rank", "Eff. Rank", "SV95", "‖A‖", "‖B‖")
+            table.add_column("Module", key="module")
+            table.add_column("Rank", key="rank")
+            table.add_column("Eff. Rank", key="eff_rank")
+            table.add_column("SV95", key="sv95")
+            table.add_column("‖A‖", key="norm_a")
+            table.add_column("‖B‖", key="norm_b")
+            # Pre-size each column to its widest possible label (base + arrow).
+            # add_column sets auto_width=True, so content_width (not width) drives
+            # the render width. Seed it here so no column starts too narrow.
+            arrow_widths = {
+                col_key: len(self._LORA_BASE_LABELS[col_key] + arrow)
+                for _, (col_key, arrow) in self._LORA_SORT_COLUMN_MAP.items()
+            }
+            for key, base_label in self._LORA_BASE_LABELS.items():
+                target_w = arrow_widths.get(key, len(base_label))
+                col = table.columns.get(key)
+                if col is not None:
+                    col.content_width = max(col.content_width, target_w)
             self._populate_initial()
             table.focus()
             self._compute_stats()
@@ -1244,12 +1306,23 @@ class LoraModeScreen(Screen):
 
         if mode == LoraSortMode.MODULE_ASC:
             pairs.sort(key=lambda p: natural_sort_key(p.module_key))
+        elif mode == LoraSortMode.MODULE_DESC:
+            pairs.sort(key=lambda p: natural_sort_key(p.module_key), reverse=True)
         elif mode == LoraSortMode.RANK_DESC:
             pairs.sort(key=lambda p: (-p.rank, natural_sort_key(p.module_key)))
+        elif mode == LoraSortMode.RANK_ASC:
+            pairs.sort(key=lambda p: (p.rank, natural_sort_key(p.module_key)))
         elif mode == LoraSortMode.EFF_RANK_DESC:
             pairs.sort(
                 key=lambda p: (
                     -stat(p.module_key, "eff_rank", 0.0),
+                    natural_sort_key(p.module_key),
+                )
+            )
+        elif mode == LoraSortMode.EFF_RANK_ASC:
+            pairs.sort(
+                key=lambda p: (
+                    stat(p.module_key, "eff_rank", 0.0),
                     natural_sort_key(p.module_key),
                 )
             )
@@ -1260,10 +1333,24 @@ class LoraModeScreen(Screen):
                     natural_sort_key(p.module_key),
                 )
             )
+        elif mode == LoraSortMode.NORM_A_ASC:
+            pairs.sort(
+                key=lambda p: (
+                    stat(p.module_key, "norm_a", 0.0),
+                    natural_sort_key(p.module_key),
+                )
+            )
         elif mode == LoraSortMode.NORM_B_DESC:
             pairs.sort(
                 key=lambda p: (
                     -stat(p.module_key, "norm_b", 0.0),
+                    natural_sort_key(p.module_key),
+                )
+            )
+        elif mode == LoraSortMode.NORM_B_ASC:
+            pairs.sort(
+                key=lambda p: (
+                    stat(p.module_key, "norm_b", 0.0),
                     natural_sort_key(p.module_key),
                 )
             )
@@ -1274,7 +1361,16 @@ class LoraModeScreen(Screen):
             return
         mode = LORA_SORT_ORDER[self._sort_idx]
         table = self.query_one("#lora-table", DataTable)
-        table.border_subtitle = f"sort: {mode.value}"
+        sorted_col, arrow = self._LORA_SORT_COLUMN_MAP[mode]
+        for key, base_label in self._LORA_BASE_LABELS.items():
+            label_text = base_label + (arrow if key == sorted_col else "")
+            col = table.columns.get(key)
+            if col is not None:
+                col.label = Text.from_markup(label_text)
+                # auto_width=True columns render from content_width, not width.
+                # Expand content_width so the label (including arrow) always fits.
+                col.content_width = max(col.content_width, len(label_text))
+        table.refresh(layout=True)
 
     def _refresh_table(self) -> None:
         if self.lora_format != "peft" or self.lora_info is None:
@@ -1496,7 +1592,9 @@ class LoraInfoScreen(ModalScreen):
     }
 
     #lora-info-container {
-        width: 80%;
+        width: 95%;
+        min-width: 50;
+        height: auto;
         max-height: 80%;
         background: $surface;
         border: thick $primary;
@@ -1633,8 +1731,10 @@ class SvdSpectrumScreen(ModalScreen):
     }
 
     #svd-container {
-        width: 80%;
-        height: 90%;
+        width: 95%;
+        min-width: 50;
+        height: auto;
+        max-height: 90%;
         background: $surface;
         border: thick $primary;
         padding: 1 2;
@@ -1659,7 +1759,8 @@ class SvdSpectrumScreen(ModalScreen):
     }
 
     #svd-chart-wrap {
-        height: 1fr;
+        height: auto;
+        max-height: 60vh;
     }
 
     #svd-chart {
@@ -1694,23 +1795,40 @@ class SvdSpectrumScreen(ModalScreen):
                 id="svd-meta",
             )
             with VerticalScroll(id="svd-chart-wrap"):
-                yield Static(self._build_chart(), id="svd-chart")
+                yield Static(self._build_chart(40), id="svd-chart")
             yield Static(self._build_stats(), id="svd-stats")
             yield Static("[dim]ESC / Enter: close[/dim]", id="svd-footer")
 
-    def _build_chart(self) -> str:
+    def on_mount(self) -> None:
+        self._rebuild_chart()
+
+    def on_resize(self) -> None:
+        self._rebuild_chart()
+
+    def _rebuild_chart(self) -> None:
+        """Size the bar chart to the available chart-wrap width."""
+        try:
+            wrap = self.query_one("#svd-chart-wrap")
+            chart = self.query_one("#svd-chart", Static)
+        except Exception:
+            return
+        # Reserve room for label ("σ NNN  ") + padding + value column.
+        # Value formats like "0.1234" are typically ~6 chars; allow 10 for safety.
+        available = wrap.size.width - 18
+        bar_width = max(10, min(120, available))
+        chart.update(self._build_chart(bar_width))
+
+    def _build_chart(self, bar_width: int) -> str:
         """Horizontal bar chart of singular values, normalized to sigma_max."""
         if not self.sv:
             return "[dim]No singular values[/dim]"
         smax = max(self.sv) or 1.0
-        # Reserve space for "σNN  " (index) and "  0.1234" (value) labels
-        bar_width = 40
         lines: list[str] = []
         for i, s in enumerate(self.sv):
             ratio = s / smax
             filled = int(round(ratio * bar_width))
-            bar = "█" * filled + "·" * (bar_width - filled)
-            lines.append(f"[dim]σ[/dim]{i + 1:>3}  [cyan]{bar}[/cyan]  {s:.4g}")
+            bar = "\u2588" * filled + "\u00b7" * (bar_width - filled)
+            lines.append(f"[dim]\u03c3[/dim]{i + 1:>3}  [cyan]{bar}[/cyan]  {s:.4g}")
         return "\n".join(lines)
 
     def _build_stats(self) -> str:
@@ -1749,6 +1867,15 @@ class SftApp(App):
         layout: grid;
         grid-size: 2 1;
         grid-columns: 1fr 2fr;
+    }
+
+    /* Reset the main-browser grid layout for modals — otherwise every
+       popup ends up as the first cell of a 2-column grid and gets
+       crushed into ~1/3 of the viewport width. */
+    ModalScreen {
+        layout: vertical;
+        grid-size: 1 1;
+        grid-columns: 1fr;
     }
 
     HierarchyTree {

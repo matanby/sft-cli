@@ -9,11 +9,18 @@ from pathlib import Path
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container
+from textual.containers import Container, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Input, Label, Static, Tree
 from textual.widgets.tree import TreeNode
+
+try:
+    from textual.command import Hit, Hits, Provider
+
+    _HAS_COMMAND_PALETTE = True
+except ImportError:  # pragma: no cover
+    _HAS_COMMAND_PALETTE = False
 
 from sft.index import (
     PrefixTree,
@@ -22,25 +29,7 @@ from sft.index import (
     TensorInfo,
     natural_sort_key,
 )
-
-
-def format_bytes(nbytes: int) -> str:
-    """Format bytes as human-readable string."""
-    if nbytes < 1024:
-        return f"{nbytes} B"
-    elif nbytes < 1024 * 1024:
-        return f"{nbytes / 1024:.1f} KB"
-    elif nbytes < 1024 * 1024 * 1024:
-        return f"{nbytes / 1024 / 1024:.1f} MB"
-    else:
-        return f"{nbytes / 1024 / 1024 / 1024:.2f} GB"
-
-
-def format_shape(shape: tuple[int, ...]) -> str:
-    """Format tensor shape as string."""
-    if len(shape) == 0:
-        return "()"
-    return f"({', '.join(str(d) for d in shape)})"
+from sft.utils.formatting import format_bytes, format_dtype, format_shape
 
 
 class SortMode(Enum):
@@ -118,7 +107,9 @@ class TensorDetailScreen(ModalScreen):
                 f"[dim]Shape:[/dim] {format_shape(t.shape)}", classes="detail-row"
             )
             yield Static(f"[dim]Rank:[/dim]  {t.rank}", classes="detail-row")
-            yield Static(f"[dim]Dtype:[/dim] {t.dtype}", classes="detail-row")
+            yield Static(
+                f"[dim]Dtype:[/dim] {format_dtype(t.dtype)}", classes="detail-row"
+            )
             yield Static(
                 f"[dim]Size:[/dim]  {format_bytes(t.nbytes)} ({t.nbytes:,} bytes)",
                 classes="detail-row",
@@ -152,9 +143,12 @@ class MetadataScreen(ModalScreen):
         margin-bottom: 1;
     }
 
+    #metadata-scroll {
+        max-height: 60vh;
+    }
+
     #metadata-content {
         height: auto;
-        max-height: 20;
     }
     """
 
@@ -175,11 +169,167 @@ class MetadataScreen(ModalScreen):
 
             if self.metadata:
                 formatted = json.dumps(self.metadata, indent=2)
-                yield Static(f"\n{formatted}", id="metadata-content")
+                with VerticalScroll(id="metadata-scroll"):
+                    yield Static(f"\n{formatted}", id="metadata-content")
             else:
                 yield Static("\n[dim]No metadata found in file[/dim]")
 
             yield Static("\n[dim]Press ESC or M to close[/dim]")
+
+
+class TensorStatsScreen(ModalScreen):
+    """Modal screen showing computed tensor statistics."""
+
+    CSS = """
+    TensorStatsScreen {
+        align: center middle;
+    }
+
+    #stats-container {
+        width: 65;
+        height: auto;
+        max-height: 80%;
+        background: $surface;
+        border: thick $warning;
+        padding: 1 2;
+    }
+
+    #stats-title {
+        text-align: center;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    .stats-row {
+        margin: 0;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+        Binding("S", "dismiss", "Close"),
+    ]
+
+    def __init__(self, tensor: TensorInfo, file_path: Path) -> None:
+        super().__init__()
+        self.tensor = tensor
+        self.file_path = file_path
+
+    def compose(self) -> ComposeResult:
+        import numpy as np
+
+        from sft.utils.tensor_io import read_tensor
+
+        t = self.tensor
+
+        with Container(id="stats-container"):
+            yield Label("Tensor Statistics", id="stats-title")
+            yield Static(f"[dim]Name:[/dim]  {t.full_name}", classes="stats-row")
+            yield Static(
+                f"[dim]Shape:[/dim] {format_shape(t.shape)}", classes="stats-row"
+            )
+            yield Static(
+                f"[dim]Dtype:[/dim] {format_dtype(t.dtype)}", classes="stats-row"
+            )
+            yield Static(
+                f"[dim]Size:[/dim]  {format_bytes(t.nbytes)}", classes="stats-row"
+            )
+            yield Static(f"[dim]Numel:[/dim] {t.numel:,}", classes="stats-row")
+
+            yield Static("", classes="stats-row")
+
+            try:
+                data = read_tensor(self.file_path, t.full_name)
+                float_data = data.astype(np.float64)
+
+                mean_val = float(np.nanmean(float_data))
+                std_val = float(np.nanstd(float_data))
+                min_val = float(np.nanmin(float_data))
+                max_val = float(np.nanmax(float_data))
+                nan_count = int(np.isnan(float_data).sum())
+                inf_count = int(np.isinf(float_data).sum())
+                zero_count = int((data == 0).sum())
+                sparsity = 100.0 * zero_count / max(data.size, 1)
+
+                yield Static(
+                    f"[dim]Mean:[/dim]     {mean_val:.6f}", classes="stats-row"
+                )
+                yield Static(f"[dim]Std:[/dim]      {std_val:.6f}", classes="stats-row")
+                yield Static(f"[dim]Min:[/dim]      {min_val:.6f}", classes="stats-row")
+                yield Static(f"[dim]Max:[/dim]      {max_val:.6f}", classes="stats-row")
+                yield Static(
+                    f"[dim]Sparsity:[/dim] {sparsity:.2f}% ({zero_count:,} zeros)",
+                    classes="stats-row",
+                )
+                yield Static(f"[dim]NaN:[/dim]      {nan_count:,}", classes="stats-row")
+                yield Static(f"[dim]Inf:[/dim]      {inf_count:,}", classes="stats-row")
+            except Exception as e:
+                yield Static(
+                    f"[red]Error computing stats: {e}[/red]", classes="stats-row"
+                )
+
+            yield Static("\n[dim]Press ESC or S to close[/dim]", classes="stats-row")
+
+
+class CastScreen(ModalScreen):
+    """Modal screen for casting a file to a different dtype."""
+
+    DTYPES = ["fp16", "fp32", "bf16"]
+
+    CSS = """
+    CastScreen {
+        align: center middle;
+    }
+
+    #cast-container {
+        width: 50;
+        height: auto;
+        max-height: 80%;
+        background: $surface;
+        border: thick $success;
+        padding: 1 2;
+    }
+
+    #cast-title {
+        text-align: center;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("1", "select_0", show=False),
+        Binding("2", "select_1", show=False),
+        Binding("3", "select_2", show=False),
+    ]
+
+    def __init__(self, file_path: Path) -> None:
+        super().__init__()
+        self.file_path = file_path
+
+    def compose(self) -> ComposeResult:
+        with Container(id="cast-container"):
+            yield Label(f"Cast {self.file_path.name} to:", id="cast-title")
+            for i, dtype in enumerate(self.DTYPES):
+                yield Static(f"  [{i + 1}] {dtype}")
+            yield Static("\n[dim]Press number to cast, ESC to cancel[/dim]")
+
+    def _select(self, idx: int) -> None:
+        if idx < len(self.DTYPES):
+            self.dismiss(self.DTYPES[idx])
+
+    def action_select_0(self) -> None:
+        self._select(0)
+
+    def action_select_1(self) -> None:
+        self._select(1)
+
+    def action_select_2(self) -> None:
+        self._select(2)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class FilterScreen(ModalScreen):
@@ -260,7 +410,7 @@ class FilterScreen(ModalScreen):
                     else "dtype-option"
                 )
                 yield Static(
-                    f"  [{i + 1}] {selected} {dtype}",
+                    f"  [{i + 1}] {selected} {format_dtype(dtype)}",
                     classes=css_class,
                     id=f"dtype-{i}",
                 )
@@ -619,7 +769,7 @@ class TensorTable(DataTable):
             self.add_row(
                 tensor.full_name,
                 format_shape(tensor.shape),
-                tensor.dtype,
+                format_dtype(tensor.dtype),
                 format_bytes(tensor.nbytes),
                 key=tensor.full_name,
             )
@@ -679,10 +829,42 @@ class SearchInput(Input):
         self.border_title = "Search (ESC to cancel)"
 
 
+if _HAS_COMMAND_PALETTE:
+
+    class SftCommands(Provider):
+        """Command palette provider for sft operations."""
+
+        async def search(self, query: str) -> Hits:
+            app = self.app
+            assert isinstance(app, SftApp)
+
+            commands: list[tuple[str, str, str]] = [
+                ("Cast to fp16", "Cast all tensors to float16", "cast_fp16"),
+                ("Cast to fp32", "Cast all tensors to float32", "cast_fp32"),
+                ("Cast to bf16", "Cast all tensors to bfloat16", "cast_bf16"),
+                ("Check file", "Validate file integrity", "check_file"),
+                ("Show metadata", "View file metadata", "show_metadata"),
+                ("Show stats", "Compute statistics for selected tensor", "show_stats"),
+                ("File info", "Show file summary", "show_info"),
+            ]
+
+            matcher = self.matcher(query)
+            for name, help_text, action_name in commands:
+                score = matcher.match(name)
+                if score > 0:
+                    yield Hit(
+                        score,
+                        matcher.highlight(name),
+                        getattr(app, f"_do_{action_name}"),
+                        help=help_text,
+                    )
+
+
 class SftApp(App):
     """Interactive browser for .safetensors files."""
 
     TITLE = "sft"
+    COMMANDS = {SftCommands} if _HAS_COMMAND_PALETTE else set()
 
     CSS = """
     Screen {
@@ -706,6 +888,16 @@ class SftApp(App):
         column-span: 2;
         dock: bottom;
     }
+
+    #lora-header {
+        dock: top;
+        height: 1;
+        background: $accent;
+        color: $text;
+        text-style: bold;
+        padding: 0 2;
+        column-span: 2;
+    }
     """
 
     BINDINGS = [
@@ -717,6 +909,9 @@ class SftApp(App):
         Binding("f", "show_filters", "Filter", show=True),
         Binding("space", "show_details", "Details", show=True),
         Binding("m", "show_metadata", "Metadata", show=True),
+        Binding("S", "show_stats", "Stats", show=True),
+        Binding("c", "cast_file", "Cast", show=True),
+        Binding("colon", "command_palette", "Commands", show=True),
         Binding("g", "goto_top", "Top", show=False),
         Binding("G", "goto_bottom", "Bottom", show=False),
     ]
@@ -733,6 +928,7 @@ class SftApp(App):
         self._sort_mode_index: int = 0
         self._search_active: bool = False
         self._current_filters: dict = {}
+        self.lora_info = None
 
     def compose(self) -> ComposeResult:
         """Compose the UI layout."""
@@ -747,6 +943,16 @@ class SftApp(App):
         except Exception as e:
             yield Static(f"Error loading file: {e}", id="error")
             return
+
+        try:
+            from sft.ops.lora.detect import detect_lora
+
+            self.lora_info = detect_lora(self.file_path)
+        except Exception:
+            self.lora_info = None
+
+        if self.lora_info:
+            yield Static(self._lora_header_text(), id="lora-header")
 
         yield HierarchyTree(self.prefix_tree)
         yield TensorTable()
@@ -894,6 +1100,106 @@ class SftApp(App):
         if self.index:
             self.push_screen(MetadataScreen(self.index.metadata, self.file_path))
 
+    def action_show_stats(self) -> None:
+        """Show computed statistics for the selected tensor."""
+        table = self.query_one(TensorTable)
+        tensor = table.get_selected_tensor()
+        if tensor:
+            self.push_screen(TensorStatsScreen(tensor, self.file_path))
+
+    def action_cast_file(self) -> None:
+        """Open cast dialog to convert file to a different dtype."""
+        if self.index is None:
+            return
+        self.push_screen(CastScreen(self.file_path), self._on_cast_result)
+
+    def _on_cast_result(self, dtype: str | None) -> None:
+        """Handle cast screen result."""
+        if dtype is None:
+            return
+        from sft.ops.cast import cast_file
+        from sft.utils.output import resolve_output
+
+        output = resolve_output(None, self.file_path, dtype)
+        try:
+            result = cast_file(self.file_path, output, dtype)
+            self.notify(
+                f"Saved to {output.name} ({result.cast_count} tensors cast)",
+                title="Cast Complete",
+            )
+        except Exception as e:
+            self.notify(f"Cast failed: {e}", severity="error")
+
+    def _do_cast_fp16(self) -> None:
+        self._do_cast("fp16")
+
+    def _do_cast_fp32(self) -> None:
+        self._do_cast("fp32")
+
+    def _do_cast_bf16(self) -> None:
+        self._do_cast("bf16")
+
+    def _do_cast(self, dtype: str) -> None:
+        from sft.ops.cast import cast_file
+        from sft.utils.output import resolve_output
+
+        output = resolve_output(None, self.file_path, dtype)
+        try:
+            result = cast_file(self.file_path, output, dtype)
+            self.notify(
+                f"Saved to {output.name} ({result.cast_count} tensors cast)",
+                title="Cast Complete",
+            )
+        except Exception as e:
+            self.notify(f"Cast failed: {e}", severity="error")
+
+    def _do_check_file(self) -> None:
+        from sft.ops.check import check_file
+
+        result = check_file(self.file_path)
+        if result.healthy:
+            self.notify("File is healthy", title="Check")
+        else:
+            issues: list[str] = []
+            if result.nan_tensors:
+                issues.append(f"NaN in: {', '.join(result.nan_tensors)}")
+            if result.inf_tensors:
+                issues.append(f"Inf in: {', '.join(result.inf_tensors)}")
+            if result.header_error:
+                issues.append(f"Header: {result.header_error}")
+            if result.offsets_error:
+                issues.append(f"Offsets: {result.offsets_error}")
+            self.notify(
+                "\n".join(issues) or "Unknown issue",
+                title="Issues Found",
+                severity="warning",
+            )
+
+    def _do_show_metadata(self) -> None:
+        self.action_show_metadata()
+
+    def _do_show_stats(self) -> None:
+        self.action_show_stats()
+
+    def _do_show_info(self) -> None:
+        from sft.ops.info import summarize
+        from sft.utils.formatting import format_bytes, format_number
+
+        try:
+            summary = summarize(self.file_path)
+            dtypes = ", ".join(
+                f"{format_dtype(d.dtype)}({d.count})" for d in summary.dtypes
+            )
+            msg = (
+                f"Tensors: {summary.total_tensors}\n"
+                f"Params: {format_number(summary.total_parameters)}\n"
+                f"Size: {format_bytes(summary.total_tensor_bytes)}\n"
+                f"Dtypes: {dtypes}"
+            )
+            self.notify(msg, title=summary.file_name)
+        except Exception as e:
+            self.notify(f"Info failed: {e}", severity="error")
+
     def action_show_filters(self) -> None:
         """Show filter palette."""
         if self.index is None:
@@ -911,6 +1217,20 @@ class SftApp(App):
             FilterScreen(self._current_filters, available_dtypes),
             on_filter_result,
         )
+
+    def _lora_header_text(self) -> str:
+        """Build the LoRA header bar text."""
+        from sft.utils.formatting import format_number
+
+        info = self.lora_info
+        parts = ["LoRA Adapter", f"Rank: {info.rank}"]
+        if info.alpha is not None:
+            parts.append(f"Alpha: {info.alpha:.0f}")
+            if info.effective_scale is not None:
+                parts.append(f"Scale: {info.effective_scale:.1f}")
+        parts.append(f"Modules: {', '.join(info.target_modules)}")
+        parts.append(f"Params: {format_number(info.total_params)}")
+        return " │ ".join(parts)
 
     def _apply_filters(self) -> None:
         """Apply current filters to the tensor list."""

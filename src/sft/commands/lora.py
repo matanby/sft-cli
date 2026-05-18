@@ -370,6 +370,112 @@ def lora_add_cmd(
     typer.echo(f"Output: {result.output_path}")
 
 
+@lora_app.command("stack", no_args_is_help=True)
+def lora_stack_cmd(
+    file_a: Path = typer.Argument(
+        ...,
+        help="First PEFT LoRA adapter.",
+        resolve_path=True,
+    ),
+    file_b: Path = typer.Argument(
+        ...,
+        help="Second PEFT LoRA adapter.",
+        resolve_path=True,
+    ),
+    coeff_a: float = typer.Option(
+        1.0,
+        "-a",
+        "--coeff-a",
+        help="Coefficient applied to file A.",
+    ),
+    coeff_b: float = typer.Option(
+        1.0,
+        "-b",
+        "--coeff-b",
+        help="Coefficient applied to file B.",
+    ),
+    output: Path | None = typer.Option(
+        None,
+        "-o",
+        "--output",
+        help="Output path (default: {a_stem}.stack.safetensors).",
+        resolve_path=True,
+    ),
+    target_rank: int | None = typer.Option(
+        None,
+        "--target-rank",
+        "-r",
+        help=(
+            "If set, SVD-truncate each merged pair back to this rank. "
+            "Default: keep the lossless merged rank (r_a + r_b)."
+        ),
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Show counts and warnings without writing.",
+    ),
+) -> None:
+    """Lossless weighted stack of two PEFT LoRAs.
+
+    Per module, stacks low-rank factors so the effective delta is
+    `a · (B_a @ A_a) + b · (B_b @ A_b)` exactly, with merged rank `r_a + r_b`.
+
+    Modules in only one file are kept and scaled by that side's coefficient.
+    Non-LoRA tensors are passed through; collisions (same name, different
+    values) produce warnings. Use `sft lora convert` first on Kohya files.
+
+    For lossy combination at a fixed output rank, see `sft lora add`.
+
+    Examples:
+      sft lora stack a.safetensors b.safetensors
+      sft lora stack a.safetensors b.safetensors -a 0.7 -b 0.3 -o mix.safetensors
+      sft lora stack a.safetensors b.safetensors --target-rank 32
+    """
+    file_a = validate_safetensors(file_a)
+    file_b = validate_safetensors(file_b)
+
+    from sft.ops.lora.stack import stack_loras
+    from sft.utils.output import resolve_output
+
+    dst = resolve_output(output, file_a, "stack")
+
+    try:
+        result = stack_loras(
+            file_a,
+            file_b,
+            dst,
+            coeff_a=coeff_a,
+            coeff_b=coeff_b,
+            target_rank=target_rank,
+            dry_run=dry_run,
+        )
+    except ValueError as e:
+        typer.secho(f"Error: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from None
+
+    for msg in result.collisions:
+        typer.secho(f"warning: {msg}", fg=typer.colors.YELLOW, err=True)
+
+    typer.echo(f"Modules in both:      {result.n_both}")
+    typer.echo(f"Modules only in A:    {result.n_a_only}")
+    typer.echo(f"Modules only in B:    {result.n_b_only}")
+    if result.n_skipped_shape:
+        typer.secho(
+            f"Skipped (shape mismatch): {result.n_skipped_shape}",
+            fg=typer.colors.YELLOW,
+        )
+    typer.echo(f"Passthrough tensors:  {result.n_passthrough}")
+    if target_rank is not None:
+        typer.echo(f"Truncated to rank:    {target_rank}")
+    else:
+        typer.echo("Rank:                 lossless (r_A + r_B per module)")
+    if dry_run:
+        typer.echo("\n(dry run — no file written)")
+    else:
+        typer.secho(f"Wrote {dst}", fg=typer.colors.GREEN)
+
+
 @lora_app.command("svd", no_args_is_help=True)
 def lora_svd_cmd(
     file: Path = typer.Argument(

@@ -12,7 +12,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, VerticalScroll
 from textual.message import Message
-from textual.screen import ModalScreen
+from textual.screen import ModalScreen, Screen
 from textual.widgets import (
     DataTable,
     DirectoryTree,
@@ -25,7 +25,7 @@ from textual.widgets import (
 from textual.widgets.tree import TreeNode
 
 try:
-    from textual.command import Hit, Hits, Provider
+    from textual.command import DiscoveryHit, Hit, Hits, Provider
 
     _HAS_COMMAND_PALETTE = True
 except ImportError:  # pragma: no cover
@@ -61,106 +61,6 @@ SORT_ORDER = [
     SortMode.RANK_DESC,
     SortMode.RANK_ASC,
 ]
-
-
-class TensorDetailScreen(ModalScreen):
-    """Modal screen showing tensor details."""
-
-    CSS = """
-    TensorDetailScreen {
-        align: center middle;
-    }
-
-    #detail-container {
-        width: 60;
-        height: auto;
-        max-height: 80%;
-        background: $surface;
-        border: thick $primary;
-        padding: 1 2;
-    }
-
-    #detail-title {
-        text-align: center;
-        text-style: bold;
-        margin-bottom: 1;
-    }
-
-    .detail-row {
-        margin: 0;
-    }
-
-    .detail-label {
-        color: $text-muted;
-    }
-
-    .detail-value {
-        color: $text;
-    }
-    """
-
-    BINDINGS = [
-        Binding("escape", "dismiss", "Close"),
-        Binding("space", "dismiss", "Close"),
-    ]
-
-    def __init__(
-        self,
-        tensor: TensorInfo,
-        lora_pair: LoRAPair | None = None,
-        lora_role: str | None = None,
-    ) -> None:
-        super().__init__()
-        self.tensor = tensor
-        self.lora_pair = lora_pair
-        self.lora_role = lora_role
-
-    def compose(self) -> ComposeResult:
-        t = self.tensor
-        with Container(id="detail-container"):
-            yield Label("Tensor Details", id="detail-title")
-            yield Static(f"[dim]Name:[/dim]  {t.full_name}", classes="detail-row")
-            yield Static(
-                f"[dim]Shape:[/dim] {format_shape(t.shape)}", classes="detail-row"
-            )
-            yield Static(f"[dim]Rank:[/dim]  {t.rank}", classes="detail-row")
-            yield Static(
-                f"[dim]Dtype:[/dim] {format_dtype(t.dtype)}", classes="detail-row"
-            )
-            yield Static(
-                f"[dim]Size:[/dim]  {format_bytes(t.nbytes)} ({t.nbytes:,} bytes)",
-                classes="detail-row",
-            )
-            yield Static(f"[dim]Numel:[/dim] {t.numel:,}", classes="detail-row")
-
-            if self.lora_pair is not None:
-                paired_name = (
-                    self.lora_pair.lora_b_name
-                    if self.lora_role == "A"
-                    else self.lora_pair.lora_a_name
-                )
-                yield Static("", classes="detail-row")
-                yield Static("[bold cyan]LoRA Pair[/bold cyan]", classes="detail-row")
-                yield Static(
-                    f"[dim]Role:[/dim]   {self.lora_role} ({'down' if self.lora_role == 'A' else 'up'})",
-                    classes="detail-row",
-                )
-                yield Static(
-                    f"[dim]Module:[/dim] {self.lora_pair.target_module}",
-                    classes="detail-row",
-                )
-                yield Static(
-                    f"[dim]Rank:[/dim]   {self.lora_pair.rank}",
-                    classes="detail-row",
-                )
-                yield Static(
-                    f"[dim]Pair:[/dim]   {paired_name}",
-                    classes="detail-row",
-                )
-
-            yield Static(
-                "\n[dim]Press ESC or SPACE to close[/dim]", classes="detail-row"
-            )
 
 
 class MetadataScreen(ModalScreen):
@@ -250,7 +150,7 @@ class TensorStatsScreen(ModalScreen):
 
     BINDINGS = [
         Binding("escape", "dismiss", "Close"),
-        Binding("S", "dismiss", "Close"),
+        Binding("enter", "dismiss", "Close"),
     ]
 
     def __init__(self, tensor: TensorInfo, file_path: Path) -> None:
@@ -765,13 +665,22 @@ if _HAS_COMMAND_PALETTE:
             assert isinstance(app, SftApp)
 
             commands: list[tuple[str, str, str]] = [
+                ("File info", "Show file summary", "show_info"),
+                ("Show metadata", "View file metadata", "show_metadata"),
+                (
+                    "Tensor details",
+                    "Show details for the selected tensor",
+                    "show_details",
+                ),
+                ("Show stats", "Compute statistics for selected tensor", "show_stats"),
                 ("Cast to fp16", "Cast all tensors to float16", "cast_fp16"),
                 ("Cast to fp32", "Cast all tensors to float32", "cast_fp32"),
                 ("Cast to bf16", "Cast all tensors to bfloat16", "cast_bf16"),
                 ("Check file", "Validate file integrity", "check_file"),
-                ("Show metadata", "View file metadata", "show_metadata"),
-                ("Show stats", "Compute statistics for selected tensor", "show_stats"),
-                ("File info", "Show file summary", "show_info"),
+                ("Diff file", "Compare against another safetensors file", "diff_file"),
+                ("LoRA mode", "Enter LoRA analysis mode", "show_lora_mode"),
+                ("Search tensors", "Filter tensors by name", "start_search"),
+                ("Cycle sort", "Cycle through sort modes", "cycle_sort"),
             ]
 
             matcher = self.matcher(query)
@@ -784,6 +693,36 @@ if _HAS_COMMAND_PALETTE:
                         getattr(app, f"_do_{action_name}"),
                         help=help_text,
                     )
+
+        async def discover(self) -> Hits:
+            app = self.app
+            assert isinstance(app, SftApp)
+
+            commands: list[tuple[str, str, str]] = [
+                ("File info", "Show file summary", "show_info"),
+                ("Show metadata", "View file metadata", "show_metadata"),
+                (
+                    "Tensor details",
+                    "Show details for the selected tensor",
+                    "show_details",
+                ),
+                ("Show stats", "Compute statistics for selected tensor", "show_stats"),
+                ("Cast to fp16", "Cast all tensors to float16", "cast_fp16"),
+                ("Cast to fp32", "Cast all tensors to float32", "cast_fp32"),
+                ("Cast to bf16", "Cast all tensors to bfloat16", "cast_bf16"),
+                ("Check file", "Validate file integrity", "check_file"),
+                ("Diff file", "Compare against another safetensors file", "diff_file"),
+                ("LoRA mode", "Enter LoRA analysis mode", "show_lora_mode"),
+                ("Search tensors", "Filter tensors by name", "start_search"),
+                ("Cycle sort", "Cycle through sort modes", "cycle_sort"),
+            ]
+
+            for name, help_text, action_name in commands:
+                yield DiscoveryHit(
+                    name,
+                    getattr(app, f"_do_{action_name}"),
+                    help=help_text,
+                )
 
 
 class LoraSortMode(Enum):
@@ -1134,123 +1073,154 @@ class DiffResultScreen(ModalScreen):
         table.focus()
 
 
-class LoraAnalysisScreen(ModalScreen):
-    """Full-screen modal showing per-pair LoRA analysis.
+class LoraModeScreen(Screen):
+    """Dedicated full-screen mode for everything LoRA.
 
-    Displays a sortable table of every LoRA pair in the file with:
-    target module, rank, effective (stable) rank, SV95 cutoff, and
-    Frobenius norms of A and B. Pressing Enter on a pair opens the
-    SVD spectrum drill-down.
+    This is the single home for LoRA-specific operations. The main browser
+    is intentionally LoRA-agnostic — pressing `L` enters this mode.
 
-    Stats are computed in a background thread; the table populates
-    progressively as results arrive, so the UI never freezes.
+    Layout:
+      • Rich header: file, format, rank, alpha/scale, modules, params
+      • Pair DataTable: module, rank, eff. rank, SV95, ‖A‖, ‖B‖
+      • Footer with sub-commands
+
+    For Kohya files, the pair table is hidden and only `k` (convert)
+    is offered — analyze/compress require PEFT layout.
+
+    Stats are computed in a background thread so the UI stays responsive
+    on adapters with hundreds of pairs.
     """
 
     CSS = """
-    LoraAnalysisScreen {
-        align: center middle;
+    LoraModeScreen {
+        layout: vertical;
     }
 
-    #lora-container {
-        width: 90%;
-        height: 90%;
-        background: $surface;
-        border: thick $accent;
-        padding: 1 2;
+    #lora-header {
+        height: auto;
+        background: $accent 30%;
+        border: tall $accent;
+        padding: 0 2;
     }
 
-    #lora-title {
-        text-align: center;
+    #lora-title-line {
         text-style: bold;
-        margin-bottom: 1;
     }
 
-    #lora-summary {
-        height: 1;
+    #lora-meta-line {
         color: $text-muted;
-        margin-bottom: 1;
+    }
+
+    #lora-body {
+        height: 1fr;
+        padding: 1 2;
     }
 
     #lora-table {
         height: 1fr;
     }
 
-    #lora-footer {
-        height: 1;
-        dock: bottom;
-        color: $text-muted;
+    #lora-kohya-notice {
+        height: auto;
+        padding: 2 4;
+        background: $warning 20%;
+        border: tall $warning;
+        text-align: center;
     }
     """
 
     BINDINGS = [
-        Binding("escape", "dismiss", "Close"),
-        Binding("l", "dismiss", "Close"),
-        Binding("s", "cycle_sort", "Sort"),
-        Binding("r", "resize_pair", "Resize"),
+        Binding("escape", "exit_mode", "Back", show=True),
+        Binding("L", "exit_mode", "Back", show=False),
+        Binding("s", "cycle_sort", "Sort", show=True),
+        Binding("c", "compress", "Compress", show=True),
+        Binding("k", "convert_format", "Convert", show=True),
+        Binding("i", "show_info", "Info", show=True),
+        # Explicitly suppress App-level bindings that don't apply in LoRA Mode.
+        # Textual's binding lookup is screen-first, so these overrides hide
+        # the (now-irrelevant) main-browser shortcuts from the footer.
+        Binding("slash", "noop", "", show=False),
+        Binding("m", "noop", "", show=False),
+        Binding("enter", "noop", "", show=False),
+        Binding("D", "noop", "", show=False),
+        Binding("tab", "noop", "", show=False),
+        Binding("g", "noop", "", show=False),
+        Binding("G", "noop", "", show=False),
     ]
+
+    def action_noop(self) -> None:
+        """No-op: swallow App-level bindings that don't apply in LoRA Mode."""
 
     def __init__(
         self,
         file_path: Path,
         index: TensorIndex,
-        lora_info: LoRAInfo,
+        lora_format: str,
+        lora_info: LoRAInfo | None,
     ) -> None:
         super().__init__()
         self.file_path = file_path
         self.index = index
-        self.lora_info = lora_info
+        self.lora_format = lora_format  # 'peft' or 'kohya'
+        self.lora_info = lora_info  # only populated for PEFT
         self._sort_idx = 0
         self._stats: dict[str, dict[str, float]] = {}
 
     def compose(self) -> ComposeResult:
-        info = self.lora_info
-        with Container(id="lora-container"):
-            yield Label("LoRA Analysis", id="lora-title")
-            summary_parts = [
-                f"{self.file_path.name}",
-                f"{len(info.pairs)} pairs",
-                f"rank {info.rank}",
-            ]
-            if info.alpha is not None:
-                summary_parts.append(f"α {info.alpha:g}")
-            summary_parts.append(f"{format_number(info.total_params)} params")
-            yield Static(" • ".join(summary_parts), id="lora-summary")
-
-            table: DataTable = DataTable(id="lora-table", zebra_stripes=True)
-            table.cursor_type = "row"
-            yield table
-
-            yield Static(
-                "[dim]enter:[/dim] spectrum  "
-                "[dim]r:[/dim] resize  "
-                "[dim]s:[/dim] sort  "
-                "[dim]esc/l:[/dim] close",
-                id="lora-footer",
-            )
+        yield Footer()
+        with Container(id="lora-header"):
+            yield Static(self._title_line(), id="lora-title-line")
+            yield Static(self._meta_line(), id="lora-meta-line")
+        with Container(id="lora-body"):
+            if self.lora_format == "peft" and self.lora_info:
+                table: DataTable = DataTable(id="lora-table", zebra_stripes=True)
+                table.cursor_type = "row"
+                yield table
+            else:
+                yield Static(
+                    "[bold yellow]Kohya-format LoRA detected.[/bold yellow]\n\n"
+                    "Analyze and Compress operate on PEFT-layout adapters.\n"
+                    "Press [bold]k[/bold] to convert this file to PEFT first,\n"
+                    "then re-open the converted file with [bold]sft browse[/bold].",
+                    id="lora-kohya-notice",
+                )
 
     def on_mount(self) -> None:
-        table = self.query_one("#lora-table", DataTable)
-        table.add_columns(
-            "Module",
-            "Rank",
-            "Eff. Rank",
-            "SV95",
-            "‖A‖",
-            "‖B‖",
+        if self.lora_format == "peft" and self.lora_info:
+            table = self.query_one("#lora-table", DataTable)
+            table.add_columns("Module", "Rank", "Eff. Rank", "SV95", "‖A‖", "‖B‖")
+            self._populate_initial()
+            table.focus()
+            self._compute_stats()
+            self._update_sort_indicator()
+
+    def _title_line(self) -> str:
+        fmt_label = self.lora_format.upper()
+        return (
+            f"LoRA Mode — [bold]{self.file_path.name}[/bold] ([cyan]{fmt_label}[/cyan])"
         )
-        self._populate_initial()
-        table.focus()
-        self._compute_stats()
-        self._update_sort_indicator()
+
+    def _meta_line(self) -> str:
+        info = self.lora_info
+        if info is None:
+            return f"[dim]Format:[/dim] {self.lora_format}  •  [dim]Not analyzable until converted to PEFT[/dim]"
+        parts = [f"rank {info.rank}"]
+        if info.alpha is not None:
+            parts.append(f"α {info.alpha:g}")
+            if info.effective_scale is not None:
+                parts.append(f"scale {info.effective_scale:.2f}")
+        parts.append(f"{len(info.pairs)} pairs")
+        parts.append(f"{info.num_layers} layers")
+        parts.append(f"modules: {', '.join(info.target_modules)}")
+        parts.append(f"{format_number(info.total_params)} params")
+        return "  •  ".join(parts)
 
     def _populate_initial(self) -> None:
-        """Add a row per pair with the values we know upfront."""
         table = self.query_one("#lora-table", DataTable)
         table.clear()
         for pair in self._sorted_pairs():
-            short_module = self._short_module_name(pair)
             table.add_row(
-                short_module,
+                self._short_module_name(pair),
                 str(pair.rank),
                 "…",
                 "…",
@@ -1260,12 +1230,12 @@ class LoraAnalysisScreen(ModalScreen):
             )
 
     def _short_module_name(self, pair: LoRAPair) -> str:
-        """Build a readable short name like 'layers.0.q_proj'."""
         parts = pair.module_key.split(".")
-        # Take the last 4 parts: enough to disambiguate layer + module
         return ".".join(parts[-4:]) if len(parts) > 4 else pair.module_key
 
     def _sorted_pairs(self) -> list[LoRAPair]:
+        if self.lora_info is None:
+            return []
         mode = LORA_SORT_ORDER[self._sort_idx]
         pairs = list(self.lora_info.pairs)
 
@@ -1300,12 +1270,15 @@ class LoraAnalysisScreen(ModalScreen):
         return pairs
 
     def _update_sort_indicator(self) -> None:
+        if self.lora_format != "peft":
+            return
         mode = LORA_SORT_ORDER[self._sort_idx]
         table = self.query_one("#lora-table", DataTable)
         table.border_subtitle = f"sort: {mode.value}"
 
     def _refresh_table(self) -> None:
-        """Rebuild the table preserving cursor on the same pair."""
+        if self.lora_format != "peft" or self.lora_info is None:
+            return
         table = self.query_one("#lora-table", DataTable)
         cursor_key = None
         if table.cursor_row is not None and table.row_count > 0:
@@ -1349,19 +1322,19 @@ class LoraAnalysisScreen(ModalScreen):
 
     @work(thread=True, exclusive=True)
     def _compute_stats(self) -> None:
-        """Compute SVD + norms for every pair in the background."""
         import numpy as np
 
         from sft.ops.lora.svd import _qr_svd
         from sft.utils.tensor_io import read_tensors
 
+        if self.lora_info is None:
+            return
+
         try:
             tensors = read_tensors(self.file_path)
         except Exception as e:
             self.app.call_from_thread(
-                self.notify,
-                f"Failed to load tensors: {e}",
-                severity="error",
+                self.notify, f"Failed to load tensors: {e}", severity="error"
             )
             return
 
@@ -1395,16 +1368,27 @@ class LoraAnalysisScreen(ModalScreen):
             self._stats[pair.module_key] = stats
             self.app.call_from_thread(self._refresh_table)
 
+    # --- Actions ---
+
+    def action_exit_mode(self) -> None:
+        self.app.pop_screen()
+
     def action_cycle_sort(self) -> None:
+        if self.lora_format != "peft":
+            return
         self._sort_idx = (self._sort_idx + 1) % len(LORA_SORT_ORDER)
         self._refresh_table()
 
     def on_data_table_row_selected(self, _event: DataTable.RowSelected) -> None:
-        """Open the SVD spectrum drill-down when the user presses Enter on a row."""
         self.action_show_spectrum()
 
     def _selected_pair(self) -> LoRAPair | None:
-        table = self.query_one("#lora-table", DataTable)
+        if self.lora_info is None:
+            return None
+        try:
+            table = self.query_one("#lora-table", DataTable)
+        except Exception:
+            return None
         if table.cursor_row is None or table.row_count == 0:
             return None
         try:
@@ -1424,13 +1408,20 @@ class LoraAnalysisScreen(ModalScreen):
         sv = stats.get("singular_values")
         if not sv:
             self.notify(
-                "Spectrum not yet computed — please wait", severity="information"
+                "Spectrum not yet computed — please wait",
+                severity="information",
             )
             return
         self.app.push_screen(SvdSpectrumScreen(pair, sv))
 
-    def action_resize_pair(self) -> None:
+    def action_compress(self) -> None:
         """Open a resize prompt to reduce the whole file's LoRA rank."""
+        if self.lora_info is None:
+            self.notify(
+                "Compress requires PEFT layout — convert from Kohya first",
+                severity="warning",
+            )
+            return
         if self.lora_info.rank <= 1:
             self.notify("Already at rank 1 — cannot reduce further", severity="warning")
             return
@@ -1448,7 +1439,7 @@ class LoraAnalysisScreen(ModalScreen):
         try:
             result = resize_lora(self.file_path, output, target_rank=target_rank)
         except ValueError as e:
-            self.notify(f"Resize failed: {e}", severity="error")
+            self.notify(f"Compress failed: {e}", severity="error")
             return
 
         max_err = max(result.errors.values()) if result.errors else 0.0
@@ -1456,8 +1447,119 @@ class LoraAnalysisScreen(ModalScreen):
             f"Saved {output.name} "
             f"(rank {result.original_rank}\u2192{result.new_rank}, "
             f"max err {max_err:.4f})",
-            title="LoRA Resized",
+            title="LoRA Compressed",
         )
+
+    def action_convert_format(self) -> None:
+        """Open Kohya<->PEFT conversion confirmation dialog."""
+        self.app.push_screen(
+            KohyaConvertScreen(self.file_path), self._on_convert_result
+        )
+
+    def _on_convert_result(self, target: str | None) -> None:
+        if target is None:
+            return
+        from sft.ops.lora.convert import convert_lora
+        from sft.utils.output import resolve_output
+
+        output = resolve_output(None, self.file_path, target)
+        try:
+            result = convert_lora(self.file_path, output, target=target)
+        except ValueError as e:
+            self.notify(f"Conversion failed: {e}", severity="error")
+            return
+
+        self.notify(
+            f"Saved {output.name} "
+            f"({result.source_format}\u2192{result.target_format}, "
+            f"{result.modules_converted} modules)",
+            title="LoRA Converted",
+        )
+
+    def action_show_info(self) -> None:
+        """Open a detailed LoRA info modal (full `sft lora info` style)."""
+        if self.lora_info is None:
+            self.notify(
+                "Info requires PEFT layout — convert from Kohya first",
+                severity="warning",
+            )
+            return
+        self.app.push_screen(LoraInfoScreen(self.file_path, self.lora_info))
+
+
+class LoraInfoScreen(ModalScreen):
+    """Detailed LoRA breakdown modal — equivalent to `sft lora info` output."""
+
+    CSS = """
+    LoraInfoScreen {
+        align: center middle;
+    }
+
+    #lora-info-container {
+        width: 80%;
+        max-height: 80%;
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+    }
+
+    #lora-info-title {
+        text-align: center;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #lora-info-body {
+        height: auto;
+        max-height: 70vh;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+        Binding("i", "dismiss", "Close"),
+    ]
+
+    def __init__(self, file_path: Path, lora_info: LoRAInfo) -> None:
+        super().__init__()
+        self.file_path = file_path
+        self.lora_info = lora_info
+
+    def compose(self) -> ComposeResult:
+        info = self.lora_info
+        with Container(id="lora-info-container"):
+            yield Label("LoRA Info", id="lora-info-title")
+            with VerticalScroll(id="lora-info-body"):
+                yield Static(f"[dim]File:[/dim]   {self.file_path.name}")
+                yield Static(f"[dim]Rank:[/dim]   {info.rank}")
+                if info.alpha is not None:
+                    extra = (
+                        f"  ([dim]scale[/dim] {info.effective_scale:.2f})"
+                        if info.effective_scale is not None
+                        else ""
+                    )
+                    yield Static(f"[dim]Alpha:[/dim]  {info.alpha:g}{extra}")
+                yield Static(f"[dim]Modules:[/dim] {', '.join(info.target_modules)}")
+                yield Static(f"[dim]Layers:[/dim] {info.num_layers}")
+                yield Static(
+                    f"[dim]Params:[/dim] {info.total_params:,} "
+                    f"({format_number(info.total_params)})"
+                )
+                yield Static("\n[bold]Pairs[/bold]")
+                for pair in info.pairs:
+                    a_shape = format_shape(pair.lora_a_shape)
+                    b_shape = format_shape(pair.lora_b_shape)
+                    short = self._short_pair_name(pair)
+                    yield Static(
+                        f"  [cyan]{short}[/cyan]   "
+                        f"A {a_shape}   B {b_shape}   {format_dtype(pair.dtype)}"
+                    )
+            yield Static("\n[dim]Press ESC or i to close[/dim]")
+
+    @staticmethod
+    def _short_pair_name(pair: LoRAPair) -> str:
+        parts = pair.module_key.split(".")
+        return ".".join(parts[-4:]) if len(parts) > 4 else pair.module_key
 
 
 class LoraResizePromptScreen(ModalScreen):
@@ -1664,16 +1766,6 @@ class SftApp(App):
         column-span: 2;
         dock: bottom;
     }
-
-    #lora-header {
-        dock: top;
-        height: 1;
-        background: $accent;
-        color: $text;
-        text-style: bold;
-        padding: 0 2;
-        column-span: 2;
-    }
     """
 
     BINDINGS = [
@@ -1682,12 +1774,10 @@ class SftApp(App):
         Binding("slash", "start_search", "Search", show=True),
         Binding("escape", "cancel_search", "Cancel", show=False),
         Binding("s", "cycle_sort", "Sort", show=True),
-        Binding("space", "show_details", "Details", show=True),
         Binding("m", "show_metadata", "Metadata", show=True),
-        Binding("S", "show_stats", "Stats", show=True),
+        Binding("enter", "show_stats", "Stats", show=True),
         Binding("c", "cast_file", "Cast", show=True),
-        Binding("l", "show_lora", "LoRA", show=True),
-        Binding("k", "convert_kohya", "Convert", show=True),
+        Binding("L", "show_lora_mode", "LoRA Mode", show=True),
         Binding("D", "diff_file", "Diff", show=True),
         Binding("colon", "command_palette", "Commands", show=True),
         Binding("g", "goto_top", "Top", show=False),
@@ -1706,7 +1796,7 @@ class SftApp(App):
         self._sort_mode_index: int = 0
         self._search_active: bool = False
         self.lora_info: LoRAInfo | None = None
-        self._lora_pair_map: dict[str, tuple[LoRAPair, str]] = {}
+        self.lora_format: str | None = None  # 'peft', 'kohya', 'mixed', or None
 
     def compose(self) -> ComposeResult:
         """Compose the UI layout."""
@@ -1723,17 +1813,15 @@ class SftApp(App):
             return
 
         try:
+            from sft.ops.lora.convert import detect_format
             from sft.ops.lora.detect import detect_lora
 
+            fmt_info = detect_format(self.file_path)
+            self.lora_format = fmt_info.format
             self.lora_info = detect_lora(self.file_path)
         except Exception:
+            self.lora_format = None
             self.lora_info = None
-
-        if self.lora_info:
-            for pair in self.lora_info.pairs:
-                self._lora_pair_map[pair.lora_a_name] = (pair, "A")
-                self._lora_pair_map[pair.lora_b_name] = (pair, "B")
-            yield Static(self._lora_header_text(), id="lora-header")
 
         yield HierarchyTree(self.prefix_tree)
         yield TensorTable()
@@ -1751,6 +1839,14 @@ class SftApp(App):
         # Focus the tree
         tree = self.query_one(HierarchyTree)
         tree.focus()
+
+        # If this is a LoRA file, surface a one-shot hint about LoRA Mode
+        if self.lora_format in ("peft", "kohya"):
+            self.notify(
+                f"{self.lora_format.upper()} LoRA detected — press L to enter LoRA Mode",
+                title="LoRA",
+                timeout=8,
+            )
 
     def on_hierarchy_tree_node_selected(
         self, event: HierarchyTree.NodeSelected
@@ -1860,17 +1956,6 @@ class SftApp(App):
         table = self.query_one(TensorTable)
         table.sort_by(mode)
 
-    def action_show_details(self) -> None:
-        """Show tensor details popup."""
-        table = self.query_one(TensorTable)
-        tensor = table.get_selected_tensor()
-
-        if tensor:
-            lora_pair, lora_role = (None, None)
-            if tensor.full_name in self._lora_pair_map:
-                lora_pair, lora_role = self._lora_pair_map[tensor.full_name]
-            self.push_screen(TensorDetailScreen(tensor, lora_pair, lora_role))
-
     def action_show_metadata(self) -> None:
         """Show file metadata popup."""
         if self.index:
@@ -1883,26 +1968,43 @@ class SftApp(App):
         if tensor:
             self.push_screen(TensorStatsScreen(tensor, self.file_path))
 
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Enter on a TensorTable row opens the Stats popup.
+
+        DataTable consumes `enter` into a RowSelected message, so the
+        App-level `enter` binding never fires while the table is focused.
+        We translate the message into the same action here. Restricted to
+        TensorTable so sub-screens (e.g. LoRA Mode) keep their own
+        enter-on-row behaviour.
+        """
+        if isinstance(event.data_table, TensorTable):
+            self.action_show_stats()
+
     def action_cast_file(self) -> None:
         """Open cast dialog to convert file to a different dtype."""
         if self.index is None:
             return
         self.push_screen(CastScreen(self.file_path), self._on_cast_result)
 
-    def action_show_lora(self) -> None:
-        """Open LoRA analysis screen (only if this file has LoRA pairs)."""
-        if self.lora_info is None or not self.lora_info.pairs:
-            self.notify("No LoRA pairs detected in this file", severity="information")
-            return
+    def action_show_lora_mode(self) -> None:
+        """Enter the dedicated LoRA Mode screen (PEFT or Kohya)."""
         if self.index is None:
             return
-        self.push_screen(LoraAnalysisScreen(self.file_path, self.index, self.lora_info))
-
-    def action_convert_kohya(self) -> None:
-        """Open Kohya<->PEFT conversion confirmation dialog."""
-        if self.index is None:
+        if self.lora_format is None:
+            self.notify(
+                "Not a LoRA file — no Kohya or PEFT modules detected",
+                severity="information",
+            )
             return
-        self.push_screen(KohyaConvertScreen(self.file_path), self._on_kohya_result)
+        if self.lora_format == "mixed":
+            self.notify(
+                "File contains both Kohya and PEFT modules — normalize first",
+                severity="warning",
+            )
+            return
+        self.push_screen(
+            LoraModeScreen(self.file_path, self.index, self.lora_format, self.lora_info)
+        )
 
     def action_diff_file(self) -> None:
         """Open file picker to choose a second file, then run the diff."""
@@ -1916,26 +2018,6 @@ class SftApp(App):
         if other is None:
             return
         self.push_screen(DiffResultScreen(self.file_path, other))
-
-    def _on_kohya_result(self, target: str | None) -> None:
-        if target is None:
-            return
-        from sft.ops.lora.convert import convert_lora
-        from sft.utils.output import resolve_output
-
-        output = resolve_output(None, self.file_path, target)
-        try:
-            result = convert_lora(self.file_path, output, target=target)
-        except ValueError as e:
-            self.notify(f"Conversion failed: {e}", severity="error")
-            return
-
-        self.notify(
-            f"Saved {output.name} "
-            f"({result.source_format}\u2192{result.target_format}, "
-            f"{result.modules_converted} modules)",
-            title="LoRA Converted",
-        )
 
     def _on_cast_result(self, dtype: str | None) -> None:
         """Handle cast screen result."""
@@ -2024,19 +2106,20 @@ class SftApp(App):
         except Exception as e:
             self.notify(f"Info failed: {e}", severity="error")
 
-    def _lora_header_text(self) -> str:
-        """Build the LoRA header bar text."""
-        from sft.utils.formatting import format_number
+    def _do_show_details(self) -> None:
+        self.action_show_details()
 
-        info = self.lora_info
-        parts = ["LoRA Adapter", f"Rank: {info.rank}"]
-        if info.alpha is not None:
-            parts.append(f"Alpha: {info.alpha:.0f}")
-            if info.effective_scale is not None:
-                parts.append(f"Scale: {info.effective_scale:.1f}")
-        parts.append(f"Modules: {', '.join(info.target_modules)}")
-        parts.append(f"Params: {format_number(info.total_params)}")
-        return " │ ".join(parts)
+    def _do_show_lora_mode(self) -> None:
+        self.action_show_lora_mode()
+
+    def _do_diff_file(self) -> None:
+        self.action_diff_file()
+
+    def _do_start_search(self) -> None:
+        self.action_start_search()
+
+    def _do_cycle_sort(self) -> None:
+        self.action_cycle_sort()
 
     def action_goto_top(self) -> None:
         """Go to top of current focused widget."""

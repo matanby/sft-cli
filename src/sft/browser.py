@@ -1878,6 +1878,14 @@ class SftApp(App):
         grid-columns: 1fr;
     }
 
+    /* Textual's command palette defaults to a full-width Vertical, which
+       looks bloated. Constrain it to a centered, modestly sized box. */
+    CommandPalette > Vertical {
+        width: 60%;
+        max-width: 90;
+        min-width: 40;
+    }
+
     HierarchyTree {
         height: 100%;
         border: solid $primary;

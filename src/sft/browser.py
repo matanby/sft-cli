@@ -332,146 +332,6 @@ class CastScreen(ModalScreen):
         self.dismiss(None)
 
 
-class FilterScreen(ModalScreen):
-    """Modal screen for filtering tensors."""
-
-    CSS = """
-    FilterScreen {
-        align: center middle;
-    }
-
-    #filter-container {
-        width: 50;
-        height: auto;
-        max-height: 80%;
-        background: $surface;
-        border: thick $accent;
-        padding: 1 2;
-    }
-
-    #filter-title {
-        text-align: center;
-        text-style: bold;
-        margin-bottom: 1;
-    }
-
-    .filter-section {
-        margin: 1 0;
-    }
-
-    .filter-label {
-        color: $text-muted;
-        margin-bottom: 0;
-    }
-
-    .filter-options {
-        margin-left: 2;
-    }
-
-    .dtype-option {
-        margin: 0;
-    }
-
-    .dtype-option.selected {
-        color: $success;
-    }
-    """
-
-    BINDINGS = [
-        Binding("escape", "dismiss", "Close"),
-        Binding("f", "dismiss", "Close"),
-        Binding("c", "clear_filters", "Clear All"),
-        Binding("1", "toggle_dtype_0", "Toggle", show=False),
-        Binding("2", "toggle_dtype_1", "Toggle", show=False),
-        Binding("3", "toggle_dtype_2", "Toggle", show=False),
-        Binding("4", "toggle_dtype_3", "Toggle", show=False),
-        Binding("5", "toggle_dtype_4", "Toggle", show=False),
-    ]
-
-    COMMON_DTYPES = ["F16", "F32", "BF16", "I8", "I32"]
-
-    def __init__(self, current_filters: dict, available_dtypes: set[str]) -> None:
-        super().__init__()
-        self.current_filters = current_filters.copy()
-        self.available_dtypes = sorted(available_dtypes)
-        self.selected_dtypes: set[str] = set(current_filters.get("dtypes", []))
-
-    def compose(self) -> ComposeResult:
-        with Container(id="filter-container"):
-            yield Label("Filter Tensors", id="filter-title")
-
-            # Dtype filter
-            yield Static("[bold]Dtype Filter[/bold]", classes="filter-section")
-            for i, dtype in enumerate(self.available_dtypes[:5]):
-                selected = "✓" if dtype in self.selected_dtypes else " "
-                css_class = (
-                    "dtype-option selected"
-                    if dtype in self.selected_dtypes
-                    else "dtype-option"
-                )
-                yield Static(
-                    f"  [{i + 1}] {selected} {format_dtype(dtype)}",
-                    classes=css_class,
-                    id=f"dtype-{i}",
-                )
-
-            yield Static("\n[dim]Keys:[/dim]", classes="filter-section")
-            yield Static("  [1-5] Toggle dtype")
-            yield Static("  [c] Clear all filters")
-            yield Static("  [ESC/f] Close")
-
-    def _toggle_dtype(self, index: int) -> None:
-        """Toggle a dtype filter."""
-        if index >= len(self.available_dtypes):
-            return
-
-        dtype = self.available_dtypes[index]
-        if dtype in self.selected_dtypes:
-            self.selected_dtypes.discard(dtype)
-        else:
-            self.selected_dtypes.add(dtype)
-
-        # Update display
-        selected = "✓" if dtype in self.selected_dtypes else " "
-        widget = self.query_one(f"#dtype-{index}", Static)
-        widget.update(f"  [{index + 1}] {selected} {dtype}")
-        if dtype in self.selected_dtypes:
-            widget.add_class("selected")
-        else:
-            widget.remove_class("selected")
-
-    def action_toggle_dtype_0(self) -> None:
-        self._toggle_dtype(0)
-
-    def action_toggle_dtype_1(self) -> None:
-        self._toggle_dtype(1)
-
-    def action_toggle_dtype_2(self) -> None:
-        self._toggle_dtype(2)
-
-    def action_toggle_dtype_3(self) -> None:
-        self._toggle_dtype(3)
-
-    def action_toggle_dtype_4(self) -> None:
-        self._toggle_dtype(4)
-
-    def action_clear_filters(self) -> None:
-        """Clear all filters."""
-        self.selected_dtypes.clear()
-        for i in range(min(5, len(self.available_dtypes))):
-            widget = self.query_one(f"#dtype-{i}", Static)
-            dtype = self.available_dtypes[i]
-            widget.update(f"  [{i + 1}]   {dtype}")
-            widget.remove_class("selected")
-
-    def action_dismiss(self) -> None:
-        """Dismiss and return filters."""
-        filters = {}
-        if self.selected_dtypes:
-            filters["dtypes"] = list(self.selected_dtypes)
-        self.dismiss(filters)
-
-
 class FilteredPrefixTree:
     """A filtered view of a PrefixTree containing only matching tensors."""
 
@@ -731,7 +591,7 @@ class TensorTable(DataTable):
         self.zebra_stripes = True
         self._tensors: list[TensorInfo] = []
         self._current_prefix: str = ""
-        self._sort_mode: SortMode | None = None
+        self._sort_mode: SortMode = SortMode.NAME_ASC
         self._columns_initialized: bool = False
 
     def on_mount(self) -> None:
@@ -748,11 +608,22 @@ class TensorTable(DataTable):
         self.add_column("Size", key="size")
         self._columns_initialized = True
 
-    def _get_sort_indicator(self) -> str:
-        """Get a string indicating the current sort mode."""
-        if self._sort_mode is None:
-            return ""
-        return f" [{self._sort_mode.value}]"
+    # Map sort modes to (column_key, suffix_with_arrow)
+    _SORT_COLUMN_MAP: dict[SortMode, tuple[str, str]] = {
+        SortMode.NAME_ASC: ("name", " ↑"),
+        SortMode.NAME_DESC: ("name", " ↓"),
+        SortMode.SIZE_ASC: ("size", " ↑"),
+        SortMode.SIZE_DESC: ("size", " ↓"),
+        SortMode.RANK_ASC: ("shape", " (rank ↑)"),
+        SortMode.RANK_DESC: ("shape", " (rank ↓)"),
+    }
+
+    _BASE_LABELS: dict[str, str] = {
+        "name": "Name",
+        "shape": "Shape",
+        "dtype": "Dtype",
+        "size": "Size",
+    }
 
     def update_tensors(self, tensors: list[TensorInfo], prefix: str = "") -> None:
         """Update the table with a list of tensors."""
@@ -765,7 +636,6 @@ class TensorTable(DataTable):
         self.clear()
 
         for tensor in self._tensors:
-            # Add sort indicator to the first row's name if sorting is active
             self.add_row(
                 tensor.full_name,
                 format_shape(tensor.shape),
@@ -774,11 +644,24 @@ class TensorTable(DataTable):
                 key=tensor.full_name,
             )
 
-        # Update border subtitle to show sort mode
-        if self._sort_mode:
-            self.border_subtitle = f"sort: {self._sort_mode.value}"
-        else:
-            self.border_subtitle = ""
+        self._update_column_labels()
+
+    def _update_column_labels(self) -> None:
+        """Update column headers with sort arrow indicators."""
+        if not self._columns_initialized:
+            return
+
+        sorted_col, arrow = self._SORT_COLUMN_MAP[self._sort_mode]
+
+        for key, base_label in self._BASE_LABELS.items():
+            label_text = base_label
+            if key == sorted_col:
+                label_text += arrow
+            col = self.columns.get(key)
+            if col is not None:
+                col.label = Text.from_markup(label_text)
+
+        self.refresh()
 
     def get_selected_tensor(self) -> TensorInfo | None:
         """Get the currently selected tensor."""
@@ -906,7 +789,6 @@ class SftApp(App):
         Binding("slash", "start_search", "Search", show=True),
         Binding("escape", "cancel_search", "Cancel", show=False),
         Binding("s", "cycle_sort", "Sort", show=True),
-        Binding("f", "show_filters", "Filter", show=True),
         Binding("space", "show_details", "Details", show=True),
         Binding("m", "show_metadata", "Metadata", show=True),
         Binding("S", "show_stats", "Stats", show=True),
@@ -927,7 +809,6 @@ class SftApp(App):
         self._base_tensors: list[TensorInfo] = []  # Before any filtering
         self._sort_mode_index: int = 0
         self._search_active: bool = False
-        self._current_filters: dict = {}
         self.lora_info = None
 
     def compose(self) -> ComposeResult:
@@ -981,20 +862,14 @@ class SftApp(App):
         tree = self.query_one(HierarchyTree)
         tensors = tree.active_tree.get_tensors_under(event.prefix)
         self._base_tensors = tensors.copy()
+        self._all_tensors = tensors.copy()
 
-        # Apply any active dtype filters
-        if self._current_filters:
-            self._apply_filters()
-        else:
-            self._all_tensors = tensors.copy()
+        # Update tensor table
+        table = self.query_one(TensorTable)
+        table.update_tensors(tensors, event.prefix)
 
-            # Update tensor table
-            table = self.query_one(TensorTable)
-            table.update_tensors(tensors, event.prefix)
-
-            # Apply current sort
-            if self._sort_mode_index > 0:
-                table.sort_by(SORT_ORDER[self._sort_mode_index])
+        # Apply current sort
+        table.sort_by(SORT_ORDER[self._sort_mode_index])
 
     def action_toggle_panel(self) -> None:
         """Toggle focus between tree and table panels."""
@@ -1034,8 +909,7 @@ class SftApp(App):
         table.update_tensors(self._all_tensors, self._current_prefix)
 
         # Apply current sort
-        if self._sort_mode_index > 0:
-            table.sort_by(SORT_ORDER[self._sort_mode_index])
+        table.sort_by(SORT_ORDER[self._sort_mode_index])
 
         # Focus tree
         tree.focus()
@@ -1063,8 +937,7 @@ class SftApp(App):
             table.update_tensors(filtered, "")
 
             # Apply current sort
-            if self._sort_mode_index > 0:
-                table.sort_by(SORT_ORDER[self._sort_mode_index])
+            table.sort_by(SORT_ORDER[self._sort_mode_index])
         else:
             # Clear filter
             tree.apply_filter(None)
@@ -1200,24 +1073,6 @@ class SftApp(App):
         except Exception as e:
             self.notify(f"Info failed: {e}", severity="error")
 
-    def action_show_filters(self) -> None:
-        """Show filter palette."""
-        if self.index is None:
-            return
-
-        # Get available dtypes
-        available_dtypes = {t.dtype for t in self.index.tensors}
-
-        def on_filter_result(filters: dict) -> None:
-            """Handle filter result."""
-            self._current_filters = filters
-            self._apply_filters()
-
-        self.push_screen(
-            FilterScreen(self._current_filters, available_dtypes),
-            on_filter_result,
-        )
-
     def _lora_header_text(self) -> str:
         """Build the LoRA header bar text."""
         from sft.utils.formatting import format_number
@@ -1231,26 +1086,6 @@ class SftApp(App):
         parts.append(f"Modules: {', '.join(info.target_modules)}")
         parts.append(f"Params: {format_number(info.total_params)}")
         return " │ ".join(parts)
-
-    def _apply_filters(self) -> None:
-        """Apply current filters to the tensor list."""
-        # Start from base tensors (all tensors under current prefix)
-        tensors = self._base_tensors.copy()
-
-        # Apply dtype filter
-        if "dtypes" in self._current_filters and self._current_filters["dtypes"]:
-            allowed = set(self._current_filters["dtypes"])
-            tensors = [t for t in tensors if t.dtype in allowed]
-
-        self._all_tensors = tensors
-
-        # Update table
-        table = self.query_one(TensorTable)
-        table.update_tensors(tensors, self._current_prefix)
-
-        # Apply current sort
-        if self._sort_mode_index > 0:
-            table.sort_by(SORT_ORDER[self._sort_mode_index])
 
     def action_goto_top(self) -> None:
         """Go to top of current focused widget."""

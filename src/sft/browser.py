@@ -7,12 +7,21 @@ from enum import Enum
 from pathlib import Path
 
 from rich.text import Text
+from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Footer, Input, Label, Static, Tree
+from textual.widgets import (
+    DataTable,
+    DirectoryTree,
+    Footer,
+    Input,
+    Label,
+    Static,
+    Tree,
+)
 from textual.widgets.tree import TreeNode
 
 try:
@@ -29,7 +38,8 @@ from sft.index import (
     TensorInfo,
     natural_sort_key,
 )
-from sft.utils.formatting import format_bytes, format_dtype, format_shape
+from sft.ops.lora.detect import LoRAInfo, LoRAPair
+from sft.utils.formatting import format_bytes, format_dtype, format_number, format_shape
 
 
 class SortMode(Enum):
@@ -94,9 +104,16 @@ class TensorDetailScreen(ModalScreen):
         Binding("space", "dismiss", "Close"),
     ]
 
-    def __init__(self, tensor: TensorInfo) -> None:
+    def __init__(
+        self,
+        tensor: TensorInfo,
+        lora_pair: LoRAPair | None = None,
+        lora_role: str | None = None,
+    ) -> None:
         super().__init__()
         self.tensor = tensor
+        self.lora_pair = lora_pair
+        self.lora_role = lora_role
 
     def compose(self) -> ComposeResult:
         t = self.tensor
@@ -115,6 +132,32 @@ class TensorDetailScreen(ModalScreen):
                 classes="detail-row",
             )
             yield Static(f"[dim]Numel:[/dim] {t.numel:,}", classes="detail-row")
+
+            if self.lora_pair is not None:
+                paired_name = (
+                    self.lora_pair.lora_b_name
+                    if self.lora_role == "A"
+                    else self.lora_pair.lora_a_name
+                )
+                yield Static("", classes="detail-row")
+                yield Static("[bold cyan]LoRA Pair[/bold cyan]", classes="detail-row")
+                yield Static(
+                    f"[dim]Role:[/dim]   {self.lora_role} ({'down' if self.lora_role == 'A' else 'up'})",
+                    classes="detail-row",
+                )
+                yield Static(
+                    f"[dim]Module:[/dim] {self.lora_pair.target_module}",
+                    classes="detail-row",
+                )
+                yield Static(
+                    f"[dim]Rank:[/dim]   {self.lora_pair.rank}",
+                    classes="detail-row",
+                )
+                yield Static(
+                    f"[dim]Pair:[/dim]   {paired_name}",
+                    classes="detail-row",
+                )
+
             yield Static(
                 "\n[dim]Press ESC or SPACE to close[/dim]", classes="detail-row"
             )
@@ -743,6 +786,856 @@ if _HAS_COMMAND_PALETTE:
                     )
 
 
+class LoraSortMode(Enum):
+    """Sort modes for the LoRA Analysis table."""
+
+    MODULE_ASC = "module ↑"
+    RANK_DESC = "rank ↓"
+    EFF_RANK_DESC = "eff. rank ↓"
+    NORM_A_DESC = "‖A‖ ↓"
+    NORM_B_DESC = "‖B‖ ↓"
+
+
+LORA_SORT_ORDER = [
+    LoraSortMode.MODULE_ASC,
+    LoraSortMode.RANK_DESC,
+    LoraSortMode.EFF_RANK_DESC,
+    LoraSortMode.NORM_A_DESC,
+    LoraSortMode.NORM_B_DESC,
+]
+
+
+class KohyaConvertScreen(ModalScreen):
+    """Confirmation modal for Kohya<->PEFT auto-detect conversion."""
+
+    CSS = """
+    KohyaConvertScreen {
+        align: center middle;
+    }
+
+    #kohya-container {
+        width: 70;
+        height: auto;
+        max-height: 80%;
+        background: $surface;
+        border: thick $success;
+        padding: 1 2;
+    }
+
+    #kohya-title {
+        text-align: center;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    .kohya-row {
+        margin: 0;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("enter", "confirm", "Convert"),
+    ]
+
+    def __init__(self, file_path: Path) -> None:
+        super().__init__()
+        self.file_path = file_path
+        self.source: str | None = None
+        self.target: str | None = None
+        self.modules_kohya = 0
+        self.modules_peft = 0
+
+    def compose(self) -> ComposeResult:
+        from sft.ops.lora.convert import detect_format
+        from sft.utils.output import resolve_output
+
+        info = detect_format(self.file_path)
+        self.source = info.format
+        with Container(id="kohya-container"):
+            yield Label("Kohya \u2194 PEFT Conversion", id="kohya-title")
+            yield Static(f"[dim]File:[/dim] {self.file_path.name}", classes="kohya-row")
+            yield Static(
+                f"[dim]Kohya modules:[/dim] {info.kohya_modules}    "
+                f"[dim]PEFT modules:[/dim] {info.peft_modules}    "
+                f"[dim]Other tensors:[/dim] {info.non_lora}",
+                classes="kohya-row",
+            )
+            yield Static("", classes="kohya-row")
+
+            if self.source is None:
+                yield Static(
+                    "[red]No LoRA tensors detected. Nothing to convert.[/red]",
+                    classes="kohya-row",
+                )
+                yield Static("\n[dim]Press ESC to close.[/dim]", classes="kohya-row")
+                return
+            if self.source == "mixed":
+                yield Static(
+                    "[red]File contains both Kohya and PEFT modules; "
+                    "normalize manually first.[/red]",
+                    classes="kohya-row",
+                )
+                yield Static("\n[dim]Press ESC to close.[/dim]", classes="kohya-row")
+                return
+
+            self.target = "peft" if self.source == "kohya" else "kohya"
+            output = resolve_output(None, self.file_path, self.target)
+            yield Static(
+                f"[bold]Detected:[/bold] [cyan]{self.source}[/cyan]    "
+                f"[bold]Will write:[/bold] [cyan]{self.target}[/cyan]",
+                classes="kohya-row",
+            )
+            yield Static(f"[dim]Output:[/dim] {output.name}", classes="kohya-row")
+            yield Static(
+                "\n[dim]ENTER: convert    ESC: cancel[/dim]",
+                classes="kohya-row",
+            )
+
+    def action_confirm(self) -> None:
+        if self.source in (None, "mixed"):
+            self.dismiss(None)
+            return
+        self.dismiss(self.target)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class SafetensorsDirectoryTree(DirectoryTree):
+    """DirectoryTree that hides everything except directories and .safetensors files."""
+
+    def filter_paths(self, paths):
+        return [
+            p
+            for p in paths
+            if p.is_dir() or (p.is_file() and p.suffix.lower() == ".safetensors")
+        ]
+
+
+class DiffFilePickerScreen(ModalScreen):
+    """File picker modal for choosing a second .safetensors file to diff against."""
+
+    CSS = """
+    DiffFilePickerScreen {
+        align: center middle;
+    }
+
+    #picker-container {
+        width: 80%;
+        height: 80%;
+        background: $surface;
+        border: thick $accent;
+        padding: 1 2;
+    }
+
+    #picker-title {
+        text-align: center;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #picker-path {
+        height: 1;
+        color: $text-muted;
+        margin-top: 1;
+    }
+
+    #picker-tree {
+        height: 1fr;
+    }
+
+    #picker-footer {
+        dock: bottom;
+        height: 1;
+        color: $text-muted;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, source_file: Path) -> None:
+        super().__init__()
+        self.source_file = source_file
+        # Start at parent so the user sees the source file's siblings
+        self.start_dir = source_file.parent
+
+    def compose(self) -> ComposeResult:
+        with Container(id="picker-container"):
+            yield Label("Pick a second .safetensors file", id="picker-title")
+            yield Static(f"[dim]Comparing against:[/dim] {self.source_file.name}")
+            yield SafetensorsDirectoryTree(str(self.start_dir), id="picker-tree")
+            yield Static("", id="picker-path")
+            yield Static(
+                "[dim]\u2191/\u2193:[/dim] navigate  "
+                "[dim]enter:[/dim] expand / select  "
+                "[dim]esc:[/dim] cancel",
+                id="picker-footer",
+            )
+
+    def on_mount(self) -> None:
+        self.query_one(SafetensorsDirectoryTree).focus()
+
+    def on_directory_tree_file_selected(
+        self, event: DirectoryTree.FileSelected
+    ) -> None:
+        """User confirmed a file selection."""
+        selected = Path(event.path)
+        if selected.resolve() == self.source_file.resolve():
+            self.notify(
+                "That's the same file — pick a different one.",
+                severity="warning",
+            )
+            return
+        self.dismiss(selected)
+
+    def on_directory_tree_file_highlighted(
+        self, event: DirectoryTree.FileHighlighted
+    ) -> None:
+        try:
+            label = self.query_one("#picker-path", Static)
+        except Exception:
+            return
+        label.update(f"[dim]Selected:[/dim] {event.path}")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class DiffResultScreen(ModalScreen):
+    """Show the result of comparing two safetensors files as a table."""
+
+    CSS = """
+    DiffResultScreen {
+        align: center middle;
+    }
+
+    #diff-container {
+        width: 95%;
+        height: 90%;
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+    }
+
+    #diff-title {
+        text-align: center;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #diff-summary {
+        color: $text-muted;
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    #diff-table {
+        height: 1fr;
+    }
+
+    #diff-footer {
+        dock: bottom;
+        height: 1;
+        color: $text-muted;
+    }
+    """
+
+    STATUS_STYLES = {
+        "added": "yellow",
+        "removed": "yellow",
+        "shape": "red",
+        "dtype": "magenta",
+        "unchanged": "green",
+    }
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+        Binding("d", "dismiss", "Close"),
+    ]
+
+    def __init__(self, file_a: Path, file_b: Path) -> None:
+        super().__init__()
+        self.file_a = file_a
+        self.file_b = file_b
+        self._loaded = False
+
+    def compose(self) -> ComposeResult:
+        with Container(id="diff-container"):
+            yield Label(
+                f"Diff: {self.file_a.name} \u2194 {self.file_b.name}",
+                id="diff-title",
+            )
+            yield Static("[dim]Computing diff...[/dim]", id="diff-summary")
+            table: DataTable = DataTable(id="diff-table", zebra_stripes=True)
+            table.cursor_type = "row"
+            yield table
+            yield Static("[dim]esc / d: close[/dim]", id="diff-footer")
+
+    def on_mount(self) -> None:
+        self._run_diff()
+
+    @work(thread=True, exclusive=True)
+    def _run_diff(self) -> None:
+        from sft.ops.diff import diff_files
+
+        try:
+            result = diff_files(self.file_a, self.file_b)
+        except Exception as e:
+            self.app.call_from_thread(
+                self.notify, f"Diff failed: {e}", severity="error"
+            )
+            self.app.call_from_thread(self.dismiss, None)
+            return
+        self.app.call_from_thread(self._show_result, result)
+
+    def _show_result(self, result) -> None:
+        table = self.query_one("#diff-table", DataTable)
+        table.add_columns("Status", "Tensor", "Detail")
+
+        rows: list[tuple[str, str, str]] = []
+        for name in result.added:
+            rows.append(("added", name, "only in B"))
+        for name in result.removed:
+            rows.append(("removed", name, "only in A"))
+        for name, (a, b) in result.shape_changed.items():
+            rows.append(("shape", name, f"{a} \u2192 {b}"))
+        for name, (a, b) in result.dtype_changed.items():
+            rows.append(("dtype", name, f"{a} \u2192 {b}"))
+        for name in result.unchanged:
+            rows.append(("unchanged", name, ""))
+
+        for status, name, detail in rows:
+            color = self.STATUS_STYLES.get(status, "white")
+            table.add_row(
+                Text(status, style=color),
+                name,
+                detail,
+            )
+
+        summary = self.query_one("#diff-summary", Static)
+        n_diff = (
+            len(result.added)
+            + len(result.removed)
+            + len(result.shape_changed)
+            + len(result.dtype_changed)
+        )
+        summary.update(
+            f"[yellow]added:[/yellow] {len(result.added)}   "
+            f"[yellow]removed:[/yellow] {len(result.removed)}   "
+            f"[red]shape:[/red] {len(result.shape_changed)}   "
+            f"[magenta]dtype:[/magenta] {len(result.dtype_changed)}   "
+            f"[green]unchanged:[/green] {len(result.unchanged)}   "
+            f"[bold]total diff:[/bold] {n_diff}"
+        )
+        self._loaded = True
+        table.focus()
+
+
+class LoraAnalysisScreen(ModalScreen):
+    """Full-screen modal showing per-pair LoRA analysis.
+
+    Displays a sortable table of every LoRA pair in the file with:
+    target module, rank, effective (stable) rank, SV95 cutoff, and
+    Frobenius norms of A and B. Pressing Enter on a pair opens the
+    SVD spectrum drill-down.
+
+    Stats are computed in a background thread; the table populates
+    progressively as results arrive, so the UI never freezes.
+    """
+
+    CSS = """
+    LoraAnalysisScreen {
+        align: center middle;
+    }
+
+    #lora-container {
+        width: 90%;
+        height: 90%;
+        background: $surface;
+        border: thick $accent;
+        padding: 1 2;
+    }
+
+    #lora-title {
+        text-align: center;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #lora-summary {
+        height: 1;
+        color: $text-muted;
+        margin-bottom: 1;
+    }
+
+    #lora-table {
+        height: 1fr;
+    }
+
+    #lora-footer {
+        height: 1;
+        dock: bottom;
+        color: $text-muted;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+        Binding("l", "dismiss", "Close"),
+        Binding("s", "cycle_sort", "Sort"),
+        Binding("r", "resize_pair", "Resize"),
+    ]
+
+    def __init__(
+        self,
+        file_path: Path,
+        index: TensorIndex,
+        lora_info: LoRAInfo,
+    ) -> None:
+        super().__init__()
+        self.file_path = file_path
+        self.index = index
+        self.lora_info = lora_info
+        self._sort_idx = 0
+        self._stats: dict[str, dict[str, float]] = {}
+
+    def compose(self) -> ComposeResult:
+        info = self.lora_info
+        with Container(id="lora-container"):
+            yield Label("LoRA Analysis", id="lora-title")
+            summary_parts = [
+                f"{self.file_path.name}",
+                f"{len(info.pairs)} pairs",
+                f"rank {info.rank}",
+            ]
+            if info.alpha is not None:
+                summary_parts.append(f"α {info.alpha:g}")
+            summary_parts.append(f"{format_number(info.total_params)} params")
+            yield Static(" • ".join(summary_parts), id="lora-summary")
+
+            table: DataTable = DataTable(id="lora-table", zebra_stripes=True)
+            table.cursor_type = "row"
+            yield table
+
+            yield Static(
+                "[dim]enter:[/dim] spectrum  "
+                "[dim]r:[/dim] resize  "
+                "[dim]s:[/dim] sort  "
+                "[dim]esc/l:[/dim] close",
+                id="lora-footer",
+            )
+
+    def on_mount(self) -> None:
+        table = self.query_one("#lora-table", DataTable)
+        table.add_columns(
+            "Module",
+            "Rank",
+            "Eff. Rank",
+            "SV95",
+            "‖A‖",
+            "‖B‖",
+        )
+        self._populate_initial()
+        table.focus()
+        self._compute_stats()
+        self._update_sort_indicator()
+
+    def _populate_initial(self) -> None:
+        """Add a row per pair with the values we know upfront."""
+        table = self.query_one("#lora-table", DataTable)
+        table.clear()
+        for pair in self._sorted_pairs():
+            short_module = self._short_module_name(pair)
+            table.add_row(
+                short_module,
+                str(pair.rank),
+                "…",
+                "…",
+                "…",
+                "…",
+                key=pair.module_key,
+            )
+
+    def _short_module_name(self, pair: LoRAPair) -> str:
+        """Build a readable short name like 'layers.0.q_proj'."""
+        parts = pair.module_key.split(".")
+        # Take the last 4 parts: enough to disambiguate layer + module
+        return ".".join(parts[-4:]) if len(parts) > 4 else pair.module_key
+
+    def _sorted_pairs(self) -> list[LoRAPair]:
+        mode = LORA_SORT_ORDER[self._sort_idx]
+        pairs = list(self.lora_info.pairs)
+
+        def stat(name: str, key: str, default: float) -> float:
+            return self._stats.get(name, {}).get(key, default)
+
+        if mode == LoraSortMode.MODULE_ASC:
+            pairs.sort(key=lambda p: natural_sort_key(p.module_key))
+        elif mode == LoraSortMode.RANK_DESC:
+            pairs.sort(key=lambda p: (-p.rank, natural_sort_key(p.module_key)))
+        elif mode == LoraSortMode.EFF_RANK_DESC:
+            pairs.sort(
+                key=lambda p: (
+                    -stat(p.module_key, "eff_rank", 0.0),
+                    natural_sort_key(p.module_key),
+                )
+            )
+        elif mode == LoraSortMode.NORM_A_DESC:
+            pairs.sort(
+                key=lambda p: (
+                    -stat(p.module_key, "norm_a", 0.0),
+                    natural_sort_key(p.module_key),
+                )
+            )
+        elif mode == LoraSortMode.NORM_B_DESC:
+            pairs.sort(
+                key=lambda p: (
+                    -stat(p.module_key, "norm_b", 0.0),
+                    natural_sort_key(p.module_key),
+                )
+            )
+        return pairs
+
+    def _update_sort_indicator(self) -> None:
+        mode = LORA_SORT_ORDER[self._sort_idx]
+        table = self.query_one("#lora-table", DataTable)
+        table.border_subtitle = f"sort: {mode.value}"
+
+    def _refresh_table(self) -> None:
+        """Rebuild the table preserving cursor on the same pair."""
+        table = self.query_one("#lora-table", DataTable)
+        cursor_key = None
+        if table.cursor_row is not None and table.row_count > 0:
+            try:
+                cursor_key = table.coordinate_to_cell_key(
+                    table.cursor_coordinate
+                ).row_key.value
+            except Exception:
+                cursor_key = None
+
+        table.clear()
+        new_cursor = 0
+        for i, pair in enumerate(self._sorted_pairs()):
+            stats = self._stats.get(pair.module_key, {})
+            table.add_row(
+                self._short_module_name(pair),
+                str(pair.rank),
+                self._fmt_eff_rank(stats.get("eff_rank")),
+                self._fmt_int(stats.get("sv95")),
+                self._fmt_float(stats.get("norm_a")),
+                self._fmt_float(stats.get("norm_b")),
+                key=pair.module_key,
+            )
+            if pair.module_key == cursor_key:
+                new_cursor = i
+        if table.row_count > 0:
+            table.move_cursor(row=new_cursor)
+        self._update_sort_indicator()
+
+    @staticmethod
+    def _fmt_float(v: float | None) -> str:
+        return "…" if v is None else f"{v:.3f}"
+
+    @staticmethod
+    def _fmt_int(v: float | None) -> str:
+        return "…" if v is None else f"{int(v)}"
+
+    @staticmethod
+    def _fmt_eff_rank(v: float | None) -> str:
+        return "…" if v is None else f"{v:.1f}"
+
+    @work(thread=True, exclusive=True)
+    def _compute_stats(self) -> None:
+        """Compute SVD + norms for every pair in the background."""
+        import numpy as np
+
+        from sft.ops.lora.svd import _qr_svd
+        from sft.utils.tensor_io import read_tensors
+
+        try:
+            tensors = read_tensors(self.file_path)
+        except Exception as e:
+            self.app.call_from_thread(
+                self.notify,
+                f"Failed to load tensors: {e}",
+                severity="error",
+            )
+            return
+
+        for pair in self.lora_info.pairs:
+            try:
+                a = tensors[pair.lora_a_name]
+                b = tensors[pair.lora_b_name]
+
+                (s,) = _qr_svd(a, b, compute_uv=False)
+                s_sq = s**2
+                total = float(s_sq.sum())
+                if total > 0:
+                    eff_rank = total / float(s_sq.max())
+                    cumvar = np.cumsum(s_sq) / total
+                    sv95 = int(np.searchsorted(cumvar, 0.95)) + 1
+                else:
+                    eff_rank = 0.0
+                    sv95 = 0
+
+                stats = {
+                    "norm_a": float(np.linalg.norm(a)),
+                    "norm_b": float(np.linalg.norm(b)),
+                    "eff_rank": eff_rank,
+                    "sv95": sv95,
+                    "sigma_max": float(s.max()) if s.size else 0.0,
+                    "singular_values": s.tolist(),
+                }
+            except Exception:  # noqa: BLE001 — keep partial results
+                stats = {}
+
+            self._stats[pair.module_key] = stats
+            self.app.call_from_thread(self._refresh_table)
+
+    def action_cycle_sort(self) -> None:
+        self._sort_idx = (self._sort_idx + 1) % len(LORA_SORT_ORDER)
+        self._refresh_table()
+
+    def on_data_table_row_selected(self, _event: DataTable.RowSelected) -> None:
+        """Open the SVD spectrum drill-down when the user presses Enter on a row."""
+        self.action_show_spectrum()
+
+    def _selected_pair(self) -> LoRAPair | None:
+        table = self.query_one("#lora-table", DataTable)
+        if table.cursor_row is None or table.row_count == 0:
+            return None
+        try:
+            key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+        except Exception:
+            return None
+        for p in self.lora_info.pairs:
+            if p.module_key == key:
+                return p
+        return None
+
+    def action_show_spectrum(self) -> None:
+        pair = self._selected_pair()
+        if pair is None:
+            return
+        stats = self._stats.get(pair.module_key, {})
+        sv = stats.get("singular_values")
+        if not sv:
+            self.notify(
+                "Spectrum not yet computed — please wait", severity="information"
+            )
+            return
+        self.app.push_screen(SvdSpectrumScreen(pair, sv))
+
+    def action_resize_pair(self) -> None:
+        """Open a resize prompt to reduce the whole file's LoRA rank."""
+        if self.lora_info.rank <= 1:
+            self.notify("Already at rank 1 — cannot reduce further", severity="warning")
+            return
+        self.app.push_screen(
+            LoraResizePromptScreen(self.lora_info.rank), self._on_resize_rank
+        )
+
+    def _on_resize_rank(self, target_rank: int | None) -> None:
+        if target_rank is None:
+            return
+        from sft.ops.lora.resize import resize_lora
+        from sft.utils.output import resolve_output
+
+        output = resolve_output(None, self.file_path, f"r{target_rank}")
+        try:
+            result = resize_lora(self.file_path, output, target_rank=target_rank)
+        except ValueError as e:
+            self.notify(f"Resize failed: {e}", severity="error")
+            return
+
+        max_err = max(result.errors.values()) if result.errors else 0.0
+        self.notify(
+            f"Saved {output.name} "
+            f"(rank {result.original_rank}\u2192{result.new_rank}, "
+            f"max err {max_err:.4f})",
+            title="LoRA Resized",
+        )
+
+
+class LoraResizePromptScreen(ModalScreen):
+    """Small modal to enter a target rank for resize."""
+
+    CSS = """
+    LoraResizePromptScreen {
+        align: center middle;
+    }
+
+    #resize-container {
+        width: 50;
+        height: auto;
+        background: $surface;
+        border: thick $warning;
+        padding: 1 2;
+    }
+
+    #resize-title {
+        text-align: center;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, current_rank: int) -> None:
+        super().__init__()
+        self.current_rank = current_rank
+
+    def compose(self) -> ComposeResult:
+        with Container(id="resize-container"):
+            yield Label("Resize LoRA", id="resize-title")
+            yield Static(f"[dim]Current rank:[/dim] {self.current_rank}")
+            yield Static(f"[dim]Target rank (1 — {self.current_rank - 1}):[/dim]")
+            yield Input(placeholder=str(self.current_rank // 2 or 1), id="rank-input")
+            yield Static("\n[dim]Enter: confirm   ESC: cancel[/dim]")
+
+    def on_mount(self) -> None:
+        self.query_one("#rank-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        try:
+            rank = int(event.value.strip())
+        except ValueError:
+            self.notify("Please enter an integer", severity="warning")
+            return
+        if rank < 1 or rank >= self.current_rank:
+            self.notify(
+                f"Rank must be between 1 and {self.current_rank - 1}",
+                severity="warning",
+            )
+            return
+        self.dismiss(rank)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class SvdSpectrumScreen(ModalScreen):
+    """Drill-down view of the singular value spectrum of a single LoRA pair.
+
+    Displays singular values as a horizontal bar chart, with effective rank
+    and variance-threshold cutoffs (90/95/99%) called out.
+    """
+
+    CSS = """
+    SvdSpectrumScreen {
+        align: center middle;
+    }
+
+    #svd-container {
+        width: 80%;
+        height: 90%;
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+    }
+
+    #svd-title {
+        text-align: center;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #svd-meta {
+        color: $text-muted;
+        margin-bottom: 1;
+        height: auto;
+    }
+
+    #svd-stats {
+        color: $text-muted;
+        height: auto;
+        margin-top: 1;
+    }
+
+    #svd-chart-wrap {
+        height: 1fr;
+    }
+
+    #svd-chart {
+        height: auto;
+    }
+
+    #svd-footer {
+        dock: bottom;
+        height: 1;
+        color: $text-muted;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+        Binding("enter", "dismiss", "Close"),
+    ]
+
+    def __init__(self, pair: LoRAPair, singular_values: list[float]) -> None:
+        super().__init__()
+        self.pair = pair
+        self.sv = [float(v) for v in singular_values]
+
+    def compose(self) -> ComposeResult:
+        with Container(id="svd-container"):
+            yield Label(f"SVD Spectrum — {self.pair.target_module}", id="svd-title")
+            yield Static(
+                f"[dim]Module:[/dim] {self.pair.module_key}\n"
+                f"[dim]Rank:[/dim] {self.pair.rank}   "
+                f"[dim]A:[/dim] {format_shape(self.pair.lora_a_shape)}   "
+                f"[dim]B:[/dim] {format_shape(self.pair.lora_b_shape)}",
+                id="svd-meta",
+            )
+            with VerticalScroll(id="svd-chart-wrap"):
+                yield Static(self._build_chart(), id="svd-chart")
+            yield Static(self._build_stats(), id="svd-stats")
+            yield Static("[dim]ESC / Enter: close[/dim]", id="svd-footer")
+
+    def _build_chart(self) -> str:
+        """Horizontal bar chart of singular values, normalized to sigma_max."""
+        if not self.sv:
+            return "[dim]No singular values[/dim]"
+        smax = max(self.sv) or 1.0
+        # Reserve space for "σNN  " (index) and "  0.1234" (value) labels
+        bar_width = 40
+        lines: list[str] = []
+        for i, s in enumerate(self.sv):
+            ratio = s / smax
+            filled = int(round(ratio * bar_width))
+            bar = "█" * filled + "·" * (bar_width - filled)
+            lines.append(f"[dim]σ[/dim]{i + 1:>3}  [cyan]{bar}[/cyan]  {s:.4g}")
+        return "\n".join(lines)
+
+    def _build_stats(self) -> str:
+        """Variance-threshold cutoffs and effective rank line."""
+        import numpy as np
+
+        if not self.sv:
+            return ""
+        sv = np.array(self.sv)
+        sq = sv**2
+        total = float(sq.sum())
+        if total == 0:
+            return "[dim]All singular values are zero[/dim]"
+        cumvar = np.cumsum(sq) / total
+        sv90 = int(np.searchsorted(cumvar, 0.90)) + 1
+        sv95 = int(np.searchsorted(cumvar, 0.95)) + 1
+        sv99 = int(np.searchsorted(cumvar, 0.99)) + 1
+        eff_rank = total / float(sq.max())
+        return (
+            f"[dim]Effective rank:[/dim] {eff_rank:.2f}   "
+            f"[dim]SV90:[/dim] {sv90}   "
+            f"[dim]SV95:[/dim] {sv95}   "
+            f"[dim]SV99:[/dim] {sv99}   "
+            f"[dim]σ_max:[/dim] {float(sv.max()):.4g}"
+        )
+
+
 class SftApp(App):
     """Interactive browser for .safetensors files."""
 
@@ -793,6 +1686,9 @@ class SftApp(App):
         Binding("m", "show_metadata", "Metadata", show=True),
         Binding("S", "show_stats", "Stats", show=True),
         Binding("c", "cast_file", "Cast", show=True),
+        Binding("l", "show_lora", "LoRA", show=True),
+        Binding("k", "convert_kohya", "Convert", show=True),
+        Binding("D", "diff_file", "Diff", show=True),
         Binding("colon", "command_palette", "Commands", show=True),
         Binding("g", "goto_top", "Top", show=False),
         Binding("G", "goto_bottom", "Bottom", show=False),
@@ -809,7 +1705,8 @@ class SftApp(App):
         self._base_tensors: list[TensorInfo] = []  # Before any filtering
         self._sort_mode_index: int = 0
         self._search_active: bool = False
-        self.lora_info = None
+        self.lora_info: LoRAInfo | None = None
+        self._lora_pair_map: dict[str, tuple[LoRAPair, str]] = {}
 
     def compose(self) -> ComposeResult:
         """Compose the UI layout."""
@@ -833,6 +1730,9 @@ class SftApp(App):
             self.lora_info = None
 
         if self.lora_info:
+            for pair in self.lora_info.pairs:
+                self._lora_pair_map[pair.lora_a_name] = (pair, "A")
+                self._lora_pair_map[pair.lora_b_name] = (pair, "B")
             yield Static(self._lora_header_text(), id="lora-header")
 
         yield HierarchyTree(self.prefix_tree)
@@ -966,7 +1866,10 @@ class SftApp(App):
         tensor = table.get_selected_tensor()
 
         if tensor:
-            self.push_screen(TensorDetailScreen(tensor))
+            lora_pair, lora_role = (None, None)
+            if tensor.full_name in self._lora_pair_map:
+                lora_pair, lora_role = self._lora_pair_map[tensor.full_name]
+            self.push_screen(TensorDetailScreen(tensor, lora_pair, lora_role))
 
     def action_show_metadata(self) -> None:
         """Show file metadata popup."""
@@ -985,6 +1888,54 @@ class SftApp(App):
         if self.index is None:
             return
         self.push_screen(CastScreen(self.file_path), self._on_cast_result)
+
+    def action_show_lora(self) -> None:
+        """Open LoRA analysis screen (only if this file has LoRA pairs)."""
+        if self.lora_info is None or not self.lora_info.pairs:
+            self.notify("No LoRA pairs detected in this file", severity="information")
+            return
+        if self.index is None:
+            return
+        self.push_screen(LoraAnalysisScreen(self.file_path, self.index, self.lora_info))
+
+    def action_convert_kohya(self) -> None:
+        """Open Kohya<->PEFT conversion confirmation dialog."""
+        if self.index is None:
+            return
+        self.push_screen(KohyaConvertScreen(self.file_path), self._on_kohya_result)
+
+    def action_diff_file(self) -> None:
+        """Open file picker to choose a second file, then run the diff."""
+        if self.index is None:
+            return
+        self.push_screen(
+            DiffFilePickerScreen(self.file_path), self._on_diff_target_picked
+        )
+
+    def _on_diff_target_picked(self, other: Path | None) -> None:
+        if other is None:
+            return
+        self.push_screen(DiffResultScreen(self.file_path, other))
+
+    def _on_kohya_result(self, target: str | None) -> None:
+        if target is None:
+            return
+        from sft.ops.lora.convert import convert_lora
+        from sft.utils.output import resolve_output
+
+        output = resolve_output(None, self.file_path, target)
+        try:
+            result = convert_lora(self.file_path, output, target=target)
+        except ValueError as e:
+            self.notify(f"Conversion failed: {e}", severity="error")
+            return
+
+        self.notify(
+            f"Saved {output.name} "
+            f"({result.source_format}\u2192{result.target_format}, "
+            f"{result.modules_converted} modules)",
+            title="LoRA Converted",
+        )
 
     def _on_cast_result(self, dtype: str | None) -> None:
         """Handle cast screen result."""

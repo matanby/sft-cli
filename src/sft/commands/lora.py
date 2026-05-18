@@ -411,6 +411,79 @@ def lora_compat_cmd(
         raise typer.Exit(code=1)
 
 
+@lora_app.command("convert", no_args_is_help=True)
+def lora_convert_cmd(
+    file: Path = typer.Argument(
+        ...,
+        help="Path to a LoRA adapter .safetensors file (Kohya or PEFT).",
+        resolve_path=True,
+    ),
+    target: str | None = typer.Option(
+        None,
+        "--to",
+        help="Target format ('kohya' or 'peft'). Default: auto-detect and "
+        "convert to the other format.",
+    ),
+    output: Path | None = typer.Option(
+        None,
+        "-o",
+        "--output",
+        help="Output path (default: {stem}.{target}.safetensors).",
+        resolve_path=True,
+    ),
+) -> None:
+    """Convert a LoRA adapter between Kohya and PEFT naming conventions."""
+    file = validate_safetensors(file)
+
+    from sft.ops.lora.convert import convert_lora, detect_format
+    from sft.utils.output import resolve_output
+
+    if target is not None and target not in ("kohya", "peft"):
+        typer.secho(
+            f"Error: --to must be 'kohya' or 'peft', got {target!r}",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    info = detect_format(file)
+    source = info.format
+    if source is None:
+        typer.secho(
+            f"Error: no LoRA tensors found in {file.name}",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    if source == "mixed":
+        typer.secho(
+            f"Error: {file.name} contains both Kohya and PEFT modules.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    target_fmt = target or ("peft" if source == "kohya" else "kohya")
+    dst = resolve_output(output, file, target_fmt)
+
+    try:
+        result = convert_lora(file, dst, target=target_fmt)
+    except ValueError as e:
+        typer.secho(f"Error: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from None
+
+    typer.secho(
+        f"Converted {result.source_format} \u2192 {result.target_format}",
+        fg=typer.colors.GREEN,
+    )
+    typer.echo(f"Modules converted: {result.modules_converted}")
+    if result.alpha is not None and result.rank is not None:
+        typer.echo(f"Alpha / rank:      {result.alpha:g} / {result.rank}")
+    if result.passthrough:
+        typer.echo(f"Passthrough:       {result.passthrough}")
+    typer.echo(f"Output:            {result.output_path}")
+
+
 @lora_app.command("merge", no_args_is_help=True)
 def lora_merge_cmd(
     base: Path = typer.Argument(

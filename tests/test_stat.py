@@ -25,8 +25,8 @@ def test_stat_basic(mini_model: Path) -> None:
 def test_stat_reports_dtypes(mini_model: Path) -> None:
     result = runner.invoke(app, ["stat", str(mini_model)])
     assert result.exit_code == 0
-    assert "fp16" in result.output
-    assert "fp32" in result.output
+    assert "FP16" in result.output
+    assert "FP32" in result.output
 
 
 def test_stat_include(mini_model: Path) -> None:

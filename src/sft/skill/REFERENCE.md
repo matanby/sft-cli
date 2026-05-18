@@ -112,18 +112,26 @@ Supports `--json` (use this when parsing the output).
 Compare two .safetensors files and show structural or value differences.
 
 Shows added/removed tensors, shape changes, and dtype changes.
-Use --delta for numerical comparison (L2 norm, cosine similarity).
+
+With --delta, also computes per-tensor numerical metrics for every tensor
+that shares name + shape + dtype between both files: max_abs, mean_abs,
+L2 (Frobenius of the difference), rel_L2 (L2 / ||a||), and cosine sim.
+Each comparable tensor is classified as `equal` (bitwise identical),
+`close` (within rtol/atol via numpy.allclose), or `differ`.
 
 Examples:
   sft diff base.safetensors finetuned.safetensors
   sft diff v1.safetensors v2.safetensors --delta
+  sft diff v1.safetensors v2.safetensors --delta --rtol 1e-3
   sft diff a.safetensors b.safetensors --include='**.weight' --json
 
 **Parameters:**
 
 - `FILE_A` — argument, required
 - `FILE_B` — argument, required
-- `--delta` — flag. Compute value-level differences (L2 norm, cosine similarity).
+- `--delta` — flag. Compute value-level differences (max_abs, mean_abs, L2, rel_L2, cosine).
+- `--rtol` — option. Relative tolerance for the 'close' classification (used with --delta).
+- `--atol` — option. Absolute tolerance for the 'close' classification (used with --delta).
 - `--json` — flag. Output as machine-readable JSON.
 - `--include` — option. Glob pattern to include tensors.
 - `--exclude` — option. Glob pattern to exclude tensors.
@@ -252,17 +260,66 @@ Examples:
 
 Reduce LoRA rank via truncated SVD.
 
-Keeps the top singular values/vectors, discarding the rest.
+Each A/B pair has a singular-value spectrum — most pairs concentrate
+almost all of their information in a small number of singular values,
+even when the LoRA was trained at a higher rank. `resize` exploits
+this by reconstructing each pair from fewer singular values, producing
+a smaller adapter that behaves nearly identically.
+
+Two ways to pick the target rank:
+
+• Fixed: `--rank 8` truncates every pair to rank 8.
+
+• Auto: `--rank auto` looks at each pair's singular values
+    independently and picks the smallest rank that captures
+    essentially all of its information. Pairs with simple updates
+    get compressed aggressively; pairs with rich updates stay
+    closer to their original rank. The output file has different
+    ranks across pairs (PEFT handles this fine). Add a safety margin
+    with `auto+N` (e.g. `auto+2` keeps 2 extra singular values per
+    pair).
+
+Run `sft lora svd <file>` first to see each pair's spectrum and
+decide whether `auto` is right for your adapter.
 
 Examples:
   sft lora resize adapter.safetensors --rank 8
-  sft lora resize adapter.safetensors -r 16 -o smaller.safetensors
+  sft lora resize adapter.safetensors --rank auto
+  sft lora resize adapter.safetensors --rank auto+2 -o out.safetensors
 
 **Parameters:**
 
 - `FILE` — argument, required
-- `--rank`/`-r` — option, required. Target rank (must be less than current rank).
+- `--rank`/`-r` — option, required. Target rank — one of:  • A positive integer (e.g. 8): every pair is truncated to the same rank.  • 'auto': each pair is shrunk individually to the smallest rank that captures essentially all of its information. Pairs whose updates barely use their full rank get compressed more than pairs with rich updates, so the output file has heterogeneous per-pair ranks.  • 'auto+N': same as 'auto' but adds N as a safety margin to each pair's chosen rank (e.g. 'auto+2' keeps 2 extra singular values per pair). Use this if 'auto' compresses too aggressively.
 - `-o`/`--output` — option. Output path (default: {stem}.r{rank}.safetensors).
+
+## `sft lora stack`
+
+Lossless weighted stack of two PEFT LoRAs.
+
+Per module, stacks low-rank factors so the effective delta is
+`a · (B_a @ A_a) + b · (B_b @ A_b)` exactly, with merged rank `r_a + r_b`.
+
+Modules in only one file are kept and scaled by that side's coefficient.
+Non-LoRA tensors are passed through; collisions (same name, different
+values) produce warnings. Use `sft lora convert` first on Kohya files.
+
+For lossy combination at a fixed output rank, see `sft lora add`.
+
+Examples:
+  sft lora stack a.safetensors b.safetensors
+  sft lora stack a.safetensors b.safetensors -a 0.7 -b 0.3 -o mix.safetensors
+  sft lora stack a.safetensors b.safetensors --target-rank 32
+
+**Parameters:**
+
+- `FILE_A` — argument, required
+- `FILE_B` — argument, required
+- `-a`/`--coeff-a` — option. Coefficient applied to file A.
+- `-b`/`--coeff-b` — option. Coefficient applied to file B.
+- `-o`/`--output` — option. Output path (default: {a_stem}.stack.safetensors).
+- `--target-rank`/`-r` — option. If set, SVD-truncate each merged pair back to this rank. Default: keep the lossless merged rank (r_a + r_b).
+- `--dry-run` — flag. Show counts and warnings without writing.
 
 ## `sft lora svd`
 

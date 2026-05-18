@@ -440,8 +440,21 @@ def test_lora_resize_prompt_stores_current_rank() -> None:
     assert screen.current_rank == 4
 
 
-def test_lora_mode_compress_auto_mode(lora_adapter: Path) -> None:
-    """Entering 'auto' in the compress prompt produces a *.rauto.safetensors file."""
+@pytest.mark.parametrize(
+    "typed_value,expected_suffix",
+    [
+        ("2", ".r2.safetensors"),
+        ("auto", ".rauto.safetensors"),
+        ("auto+2", ".rauto+2.safetensors"),
+    ],
+    ids=["integer", "auto", "auto+N"],
+)
+def test_lora_mode_compress_writes_named_output(
+    lora_adapter: Path, typed_value: str, expected_suffix: str
+) -> None:
+    """Compress accepts integer / auto / auto+N and names the output accordingly."""
+    from textual.widgets import Input
+
     from sft.browser import LoraModeScreen, LoraResizePromptScreen, SftApp
 
     async def _run() -> None:
@@ -454,15 +467,10 @@ def test_lora_mode_compress_auto_mode(lora_adapter: Path) -> None:
             await pilot.pause()
             assert isinstance(app.screen, LoraResizePromptScreen)
 
-            # Type "auto" and submit
-            from textual.widgets import Input
-
-            app.screen.query_one("#rank-input", Input).value = "auto"
+            app.screen.query_one("#rank-input", Input).value = typed_value
             await pilot.press("enter")
             await pilot.pause()
-            # Output file should exist
-            out = lora_adapter.parent / "adapter.rauto.safetensors"
-            assert out.exists()
+            assert (lora_adapter.parent / f"adapter{expected_suffix}").exists()
 
     asyncio.run(_run())
 

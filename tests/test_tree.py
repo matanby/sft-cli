@@ -21,7 +21,7 @@ def test_tree_shows_hierarchy(mini_model: Path):
 def test_tree_shows_tensor_info(mini_model: Path):
     result = runner.invoke(app, ["tree", str(mini_model)])
     assert result.exit_code == 0
-    assert "fp16" in result.output
+    assert "FP16" in result.output
 
 
 def test_tree_depth_limit(mini_model: Path):

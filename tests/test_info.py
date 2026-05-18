@@ -17,7 +17,7 @@ def test_info_shows_file_summary(mini_model: Path) -> None:
     assert result.exit_code == 0
     assert mini_model.name in result.output
     assert "14" in result.output
-    assert "fp16" in result.output
+    assert "FP16" in result.output
 
 
 def test_info_shows_metadata(mini_model: Path) -> None:

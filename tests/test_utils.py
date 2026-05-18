@@ -58,16 +58,16 @@ class TestFormatShape:
 
 class TestFormatDtype:
     def test_float16(self):
-        assert format_dtype("F16") == "fp16"
+        assert format_dtype("F16") == "FP16"
 
     def test_bfloat16(self):
-        assert format_dtype("BF16") == "bf16"
+        assert format_dtype("BF16") == "BF16"
 
     def test_float32(self):
-        assert format_dtype("F32") == "fp32"
+        assert format_dtype("F32") == "FP32"
 
     def test_passthrough(self):
-        assert format_dtype("I32") == "int32"
+        assert format_dtype("I32") == "INT32"
 
     def test_unknown(self):
         assert format_dtype("WEIRD") == "WEIRD"

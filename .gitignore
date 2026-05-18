@@ -28,3 +28,7 @@ dist/
 
 # Test files
 *.safetensors
+
+# Skill installer state (written by `sft skill install` into the source dir
+# when developing locally — not source code).
+.sft-skill-install.json

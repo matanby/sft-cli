@@ -84,4 +84,14 @@ dev = [
     "pre-commit>=4.3.0",
     "ruff>=0.14.10",
     "pytest>=8.0",
+    "hypothesis>=6.100",
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers -m 'not slow'"
+markers = [
+    "slow: long-running tests (perf, build, subprocess E2E) — opt in with `-m slow` or `-m ''` to include",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
 ]

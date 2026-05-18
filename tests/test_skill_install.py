@@ -258,3 +258,42 @@ def test_shipped_reference_is_present() -> None:
     from sft.commands.skill import _resolve_source
 
     assert (_resolve_source() / "REFERENCE.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# Per-agent install + uninstall round-trip (parametrized over AGENT_DIRS)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("fake_skill_source", "fake_home")
+@pytest.mark.parametrize("agent", list(skill_cmd.AGENT_DIRS.keys()))
+def test_skill_install_uninstall_per_agent_round_trip(agent: str) -> None:
+    """Install -> status -> uninstall completes cleanly for every supported agent."""
+    # Install
+    install = runner.invoke(app, ["skill", "install", "--agent", agent, "--json"])
+    assert install.exit_code == 0, install.output
+    install_payload = json.loads(install.output)
+    assert install_payload[0]["agent"] == agent
+    assert install_payload[0]["action"] == "installed"
+
+    expected_dir = (
+        Path(skill_cmd.AGENT_DIRS[agent][0]).expanduser() / skill_cmd.SKILL_DIRNAME
+    )
+    assert (expected_dir / "SKILL.md").exists()
+
+    # Status sees it as present
+    status = runner.invoke(app, ["skill", "status", "--json"])
+    rows = {row["agent"]: row for row in json.loads(status.output)}
+    assert rows[agent]["action"] == "present"
+
+    # Uninstall removes it, and a second uninstall is a clean no-op.
+    removed = runner.invoke(app, ["skill", "uninstall", "--agent", agent, "--json"])
+    assert removed.exit_code == 0
+    assert json.loads(removed.output)[0]["action"] == "removed"
+    assert not (expected_dir / "SKILL.md").exists()
+
+    second = runner.invoke(app, ["skill", "uninstall", "--agent", agent, "--json"])
+    assert second.exit_code == 0
+    # Idempotent: second remove reports no work.
+    second_payload = json.loads(second.output)
+    assert second_payload[0]["action"] in {"skip", "absent", "noop"}

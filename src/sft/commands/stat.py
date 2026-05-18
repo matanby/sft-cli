@@ -116,10 +116,11 @@ def stat(
     file = validate_safetensors(file)
     results = compute_stats(file, include=include, exclude=exclude)
 
-    if json_output:
-        _print_json(results)
-    else:
-        _print_table(results)
+    if not check:
+        if json_output:
+            _print_json(results)
+        else:
+            _print_table(results)
 
     if check:
         has_bad = any(s.nan_count > 0 or s.inf_count > 0 for s in results)

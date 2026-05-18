@@ -440,6 +440,33 @@ def test_lora_resize_prompt_stores_current_rank() -> None:
     assert screen.current_rank == 4
 
 
+def test_lora_mode_compress_auto_mode(lora_adapter: Path) -> None:
+    """Entering 'auto' in the compress prompt produces a *.rauto.safetensors file."""
+    from sft.browser import LoraModeScreen, LoraResizePromptScreen, SftApp
+
+    async def _run() -> None:
+        app = SftApp(lora_adapter)
+        async with app.run_test() as pilot:
+            await pilot.press("L")
+            await pilot.pause()
+            assert isinstance(app.screen, LoraModeScreen)
+            await pilot.press("c")
+            await pilot.pause()
+            assert isinstance(app.screen, LoraResizePromptScreen)
+
+            # Type "auto" and submit
+            from textual.widgets import Input
+
+            app.screen.query_one("#rank-input", Input).value = "auto"
+            await pilot.press("enter")
+            await pilot.pause()
+            # Output file should exist
+            out = lora_adapter.parent / "adapter.rauto.safetensors"
+            assert out.exists()
+
+    asyncio.run(_run())
+
+
 def test_lora_mode_footer_hides_main_browser_bindings(lora_adapter: Path) -> None:
     """The LoRA Mode footer must not surface main-browser-only commands.
 

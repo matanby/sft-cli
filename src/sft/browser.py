@@ -1632,24 +1632,46 @@ class LoraModeScreen(Screen):
             LoraResizePromptScreen(self.lora_info.rank), self._on_resize_rank
         )
 
-    def _on_resize_rank(self, target_rank: int | None) -> None:
-        if target_rank is None:
+    def _on_resize_rank(self, choice: int | tuple[str, int] | None) -> None:
+        """Handle the resize prompt result. `choice` is an int rank, an
+        ("auto", margin) tuple, or None to cancel."""
+        if choice is None:
             return
         from sft.ops.lora.resize import resize_lora
         from sft.utils.output import resolve_output
 
-        output = resolve_output(None, self.file_path, f"r{target_rank}")
+        if isinstance(choice, tuple) and choice[0] == "auto":
+            margin = choice[1]
+            target_rank, auto_margin = None, margin
+            suffix = "rauto" if margin == 1 else f"rauto+{margin}"
+        else:
+            target_rank = int(choice)  # type: ignore[arg-type]
+            auto_margin = None
+            suffix = f"r{target_rank}"
+
+        output = resolve_output(None, self.file_path, suffix)
         try:
-            result = resize_lora(self.file_path, output, target_rank=target_rank)
+            result = resize_lora(
+                self.file_path,
+                output,
+                target_rank=target_rank,
+                auto_margin=auto_margin,
+            )
         except ValueError as e:
             self.notify(f"Compress failed: {e}", severity="error")
             return
 
         max_err = max(result.errors.values()) if result.errors else 0.0
+        min_energy = min(result.energies.values()) if result.energies else 1.0
+        if auto_margin is not None:
+            ranks = result.per_module_ranks.values()
+            rank_desc = f"auto ({min(ranks)}\u2013{max(ranks)})"
+        else:
+            rank_desc = str(result.new_rank)
         self.notify(
             f"Saved {output.name} "
-            f"(rank {result.original_rank}\u2192{result.new_rank}, "
-            f"max err {max_err:.4f})",
+            f"(rank {result.original_rank}\u2192{rank_desc}, "
+            f"max err {max_err:.4f}, min energy {min_energy:.3f})",
             title="LoRA Compressed",
         )
 
@@ -1768,7 +1790,12 @@ class LoraInfoScreen(ModalScreen):
 
 
 class LoraResizePromptScreen(ModalScreen):
-    """Small modal to enter a target rank for resize."""
+    """Modal to enter a target rank for compress (resize).
+
+    Accepts either a positive integer < current rank, or "auto" / "auto+N"
+    to truncate each pair to ``ceil(stable_rank) + N`` (N defaults to 1).
+    Dismisses with either an `int` (fixed rank) or a tuple `("auto", N)`.
+    """
 
     CSS = """
     LoraResizePromptScreen {
@@ -1776,7 +1803,7 @@ class LoraResizePromptScreen(ModalScreen):
     }
 
     #resize-container {
-        width: 50;
+        width: 78;
         height: auto;
         background: $surface;
         border: thick $warning;
@@ -1786,6 +1813,10 @@ class LoraResizePromptScreen(ModalScreen):
     #resize-title {
         text-align: center;
         text-style: bold;
+        margin-bottom: 1;
+    }
+
+    .resize-section {
         margin-bottom: 1;
     }
     """
@@ -1798,28 +1829,66 @@ class LoraResizePromptScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Container(id="resize-container"):
-            yield Label("Resize LoRA", id="resize-title")
-            yield Static(f"[dim]Current rank:[/dim] {self.current_rank}")
-            yield Static(f"[dim]Target rank (1 — {self.current_rank - 1}):[/dim]")
-            yield Input(placeholder=str(self.current_rank // 2 or 1), id="rank-input")
-            yield Static("\n[dim]Enter: confirm   ESC: cancel[/dim]")
+            yield Label("Compress LoRA", id="resize-title")
+            yield Static(
+                f"[dim]Current rank:[/dim] {self.current_rank}",
+                classes="resize-section",
+            )
+
+            yield Static(
+                "[bold]Options:[/bold]",
+                classes="resize-section",
+            )
+            yield Static(
+                "  [cyan]integer[/cyan] (e.g. [bold]8[/bold])\n"
+                f"      Truncate every pair to the same rank "
+                f"(must be in [1, {self.current_rank - 1}]).",
+                classes="resize-section",
+            )
+            yield Static(
+                "  [cyan]auto[/cyan]\n"
+                "      Shrink each pair individually to the smallest rank that "
+                "captures essentially all of its information. Output ranks "
+                "vary per pair: aggressive on pairs with simple updates, "
+                "conservative on pairs with rich ones.",
+                classes="resize-section",
+            )
+            yield Static(
+                "  [cyan]auto+N[/cyan] (e.g. [bold]auto+2[/bold])\n"
+                "      Same as auto, but keep N extra singular values per pair "
+                "as a safety margin.",
+                classes="resize-section",
+            )
+
+            yield Input(placeholder="enter target rank...", id="rank-input")
+            yield Static(
+                "\n[dim]Enter: confirm   ESC: cancel[/dim]",
+                classes="resize-section",
+            )
 
     def on_mount(self) -> None:
         self.query_one("#rank-input", Input).focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
+        from sft.commands.lora import _parse_rank_spec
+
         try:
-            rank = int(event.value.strip())
-        except ValueError:
-            self.notify("Please enter an integer", severity="warning")
+            target_rank, auto_margin = _parse_rank_spec(event.value)
+        except ValueError as e:
+            self.notify(str(e), severity="warning")
             return
-        if rank < 1 or rank >= self.current_rank:
+        if target_rank is not None and target_rank >= self.current_rank:
             self.notify(
-                f"Rank must be between 1 and {self.current_rank - 1}",
+                f"Rank must be between 1 and {self.current_rank - 1} "
+                f"(or use 'auto'/'auto+N')",
                 severity="warning",
             )
             return
-        self.dismiss(rank)
+        # Dismiss with int for fixed mode, tuple ("auto", N) for auto mode
+        if auto_margin is not None:
+            self.dismiss(("auto", auto_margin))
+        else:
+            self.dismiss(target_rank)
 
     def action_cancel(self) -> None:
         self.dismiss(None)

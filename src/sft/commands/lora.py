@@ -161,6 +161,38 @@ def lora_info_cmd(
         )
 
 
+def _parse_rank_spec(spec: str) -> tuple[int | None, int | None]:
+    """Parse a rank spec into (target_rank, auto_margin).
+
+    Accepts:
+      "8"      -> (8, None)
+      "auto"   -> (None, 1)
+      "auto+N" -> (None, N) for any non-negative N
+    """
+    s = spec.strip().lower()
+    if s == "auto":
+        return None, 1
+    if s.startswith("auto+"):
+        try:
+            margin = int(s[len("auto+") :])
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid auto margin in {spec!r}; expected 'auto+N' with integer N"
+            ) from exc
+        if margin < 0:
+            raise ValueError(f"auto margin must be >= 0, got {margin}")
+        return None, margin
+    try:
+        rank = int(s)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid rank {spec!r}; expected a positive integer, 'auto', or 'auto+N'"
+        ) from exc
+    if rank < 1:
+        raise ValueError(f"rank must be >= 1, got {rank}")
+    return rank, None
+
+
 @lora_app.command("resize", no_args_is_help=True)
 def lora_resize_cmd(
     file: Path = typer.Argument(
@@ -168,11 +200,23 @@ def lora_resize_cmd(
         help="Path to a LoRA adapter .safetensors file.",
         resolve_path=True,
     ),
-    rank: int = typer.Option(
+    rank: str = typer.Option(
         ...,
         "--rank",
         "-r",
-        help="Target rank (must be less than current rank).",
+        help=(
+            "Target rank — one of:\n\n"
+            "  • A positive integer (e.g. 8): every pair is truncated to "
+            "the same rank.\n\n"
+            "  • 'auto': each pair is shrunk individually to the smallest "
+            "rank that captures essentially all of its information. Pairs "
+            "whose updates barely use their full rank get compressed more "
+            "than pairs with rich updates, so the output file has "
+            "heterogeneous per-pair ranks.\n\n"
+            "  • 'auto+N': same as 'auto' but adds N as a safety margin to "
+            "each pair's chosen rank (e.g. 'auto+2' keeps 2 extra singular "
+            "values per pair). Use this if 'auto' compresses too aggressively."
+        ),
     ),
     output: Path | None = typer.Option(
         None,
@@ -184,30 +228,74 @@ def lora_resize_cmd(
 ) -> None:
     """Reduce LoRA rank via truncated SVD.
 
-    Keeps the top singular values/vectors, discarding the rest.
+    Each A/B pair has a singular-value spectrum — most pairs concentrate
+    almost all of their information in a small number of singular values,
+    even when the LoRA was trained at a higher rank. `resize` exploits
+    this by reconstructing each pair from fewer singular values, producing
+    a smaller adapter that behaves nearly identically.
+
+    Two ways to pick the target rank:
+
+      • Fixed: `--rank 8` truncates every pair to rank 8.
+
+      • Auto: `--rank auto` looks at each pair's singular values
+        independently and picks the smallest rank that captures
+        essentially all of its information. Pairs with simple updates
+        get compressed aggressively; pairs with rich updates stay
+        closer to their original rank. The output file has different
+        ranks across pairs (PEFT handles this fine). Add a safety margin
+        with `auto+N` (e.g. `auto+2` keeps 2 extra singular values per
+        pair).
+
+    Run `sft lora svd <file>` first to see each pair's spectrum and
+    decide whether `auto` is right for your adapter.
 
     Examples:
       sft lora resize adapter.safetensors --rank 8
-      sft lora resize adapter.safetensors -r 16 -o smaller.safetensors
+      sft lora resize adapter.safetensors --rank auto
+      sft lora resize adapter.safetensors --rank auto+2 -o out.safetensors
     """
     file = validate_safetensors(file)
 
     from sft.ops.lora.resize import resize_lora
     from sft.utils.output import resolve_output
 
-    dst = resolve_output(output, file, f"r{rank}")
-
     try:
-        result = resize_lora(file, dst, target_rank=rank)
+        target_rank, auto_margin = _parse_rank_spec(rank)
     except ValueError as e:
         typer.secho(f"Error: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from None
 
-    typer.echo(f"Resized rank {result.original_rank} → {result.new_rank}")
+    suffix = (
+        f"r{target_rank}"
+        if target_rank is not None
+        else ("rauto" if auto_margin == 1 else f"rauto+{auto_margin}")
+    )
+    dst = resolve_output(output, file, suffix)
+
+    try:
+        result = resize_lora(
+            file, dst, target_rank=target_rank, auto_margin=auto_margin
+        )
+    except ValueError as e:
+        typer.secho(f"Error: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from None
+
+    if auto_margin is not None:
+        ranks = result.per_module_ranks.values()
+        typer.echo(
+            f"Resized rank {result.original_rank} \u2192 auto (range "
+            f"{min(ranks)}\u2013{max(ranks)}, margin +{auto_margin})"
+        )
+    else:
+        typer.echo(f"Resized rank {result.original_rank} \u2192 {result.new_rank}")
+
     typer.echo(f"Modules resized: {result.modules_resized}")
     if result.errors:
         max_err = max(result.errors.values())
+        min_energy = min(result.energies.values())
         typer.echo(f"Max reconstruction error: {max_err:.6f}")
+        typer.echo(f"Min energy retained:      {min_energy:.4f}")
     typer.echo(f"Written to: {dst}")
 
 

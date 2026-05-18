@@ -86,3 +86,30 @@ def test_resize_metadata_updated(lora_adapter: Path, tmp_path: Path):
     index = TensorIndex.from_file(dst)
     assert index.metadata["rank"] == "2"
     assert index.metadata["alpha"] == "8"
+
+
+def test_resize_error_matches_energy(lora_adapter: Path, tmp_path: Path):
+    """Reported error is consistent with the SVD energy not retained."""
+    dst = tmp_path / "out.safetensors"
+    result = resize_lora(lora_adapter, dst, target_rank=2)
+
+    old = load_file(str(lora_adapter))
+    new = load_file(str(dst))
+
+    for pair_key in [
+        "base_model.model.model.layers.0.self_attn.q_proj",
+        "base_model.model.model.layers.0.self_attn.v_proj",
+    ]:
+        a_name = f"{pair_key}.lora_A.weight"
+        b_name = f"{pair_key}.lora_B.weight"
+        target = pair_key.split(".")[-1]
+
+        old_delta = old[b_name].astype(np.float64) @ old[a_name].astype(np.float64)
+        new_delta = new[b_name].astype(np.float64) @ new[a_name].astype(np.float64)
+
+        actual_error = np.linalg.norm(old_delta - new_delta, "fro") / np.linalg.norm(
+            old_delta, "fro"
+        )
+        reported_error = result.errors[target]
+
+        np.testing.assert_allclose(actual_error, reported_error, rtol=0.05)

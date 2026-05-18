@@ -1,4 +1,8 @@
-"""Reduce LoRA rank via truncated SVD."""
+"""Reduce LoRA rank via truncated SVD.
+
+Uses the same QR-accelerated SVD as svd.py — avoids forming the full
+B@A product matrix, keeping cost at O(rank^3) instead of O(out*in*rank).
+"""
 
 from __future__ import annotations
 
@@ -8,6 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from sft.ops.lora.detect import detect_lora
+from sft.ops.lora.svd import _qr_svd
 from sft.utils.tensor_io import read_tensors, write_file
 
 
@@ -28,8 +33,9 @@ def resize_lora(
 ) -> ResizeResult:
     """Resize a LoRA adapter to a lower rank using truncated SVD.
 
-    For each A/B pair, reconstructs delta = B @ A, decomposes via SVD,
-    and keeps only the top `target_rank` singular values/vectors.
+    For each A/B pair, decomposes B@A via QR-accelerated SVD and keeps
+    only the top `target_rank` singular values/vectors.  The sqrt of each
+    kept singular value is split evenly between the new A and B factors.
     """
     info = detect_lora(src)
     if info is None:
@@ -53,23 +59,23 @@ def resize_lora(
     for pair in info.pairs:
         a = tensors[pair.lora_a_name]
         b = tensors[pair.lora_b_name]
+        orig_dtype = a.dtype
 
-        delta = b @ a
-        u, s, vt = np.linalg.svd(delta, full_matrices=False)
+        u, s, vt = _qr_svd(a, b, compute_uv=True)
 
         r = target_rank
-        sqrt_s = np.sqrt(s[:r]).astype(delta.dtype)
-        a_new = sqrt_s[:, np.newaxis] * vt[:r, :]
-        b_new = u[:, :r] * sqrt_s[np.newaxis, :]
+        sqrt_s = np.sqrt(s[:r])
+        a_new = (sqrt_s[:, np.newaxis] * vt[:r, :]).astype(orig_dtype)
+        b_new = (u[:, :r] * sqrt_s[np.newaxis, :]).astype(orig_dtype)
 
-        delta_norm = np.linalg.norm(delta, "fro")
-        if delta_norm > 0:
-            reconstruction = b_new @ a_new
-            error = np.linalg.norm(delta - reconstruction, "fro") / delta_norm
+        s_sq = s**2
+        total_energy = s_sq.sum()
+        if total_energy > 0:
+            error = float(np.sqrt(1.0 - s_sq[:r].sum() / total_energy))
         else:
             error = 0.0
 
-        errors[pair.target_module] = float(error)
+        errors[pair.target_module] = error
         new_tensors[pair.lora_a_name] = a_new
         new_tensors[pair.lora_b_name] = b_new
 

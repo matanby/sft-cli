@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import typer
@@ -45,6 +46,11 @@ def cast(
         "--dry-run",
         help="Show what would be cast without writing.",
     ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Output a JSON report.",
+    ),
 ) -> None:
     """Cast tensor dtypes in a .safetensors file.
 
@@ -69,8 +75,22 @@ def cast(
             dry_run=dry_run,
         )
     except ValueError as e:
-        typer.secho(f"Error: {e}", fg=typer.colors.RED, err=True)
+        if json_output:
+            typer.echo(json.dumps({"error": str(e)}, indent=2))
+        else:
+            typer.secho(f"Error: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from None
+
+    if json_output:
+        data = {
+            "dry_run": dry_run,
+            "dtype": dtype,
+            "cast_count": result.cast_count,
+            "skipped_count": result.skipped_count,
+            "output_path": str(result.output_path) if not dry_run else None,
+        }
+        typer.echo(json.dumps(data, indent=2))
+        return
 
     if dry_run:
         typer.echo(

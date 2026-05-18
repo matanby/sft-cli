@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import typer
@@ -34,6 +35,11 @@ def rename(
         "--dry-run",
         help="Show old → new name mappings without writing.",
     ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Output a JSON report.",
+    ),
 ) -> None:
     """Rename tensor keys using regex substitution.
 
@@ -47,17 +53,17 @@ def rename(
     """
     file = validate_safetensors(file)
 
+    def _fail(msg: str) -> None:
+        if json_output:
+            typer.echo(json.dumps({"error": msg}, indent=2))
+        else:
+            typer.secho(f"Error: {msg}", fg=typer.colors.RED, err=True)
+
     if len(sub) == 0:
-        typer.secho(
-            "Error: at least one --sub pair is required.", fg=typer.colors.RED, err=True
-        )
+        _fail("at least one --sub pair is required.")
         raise typer.Exit(code=1)
     if len(sub) % 2 != 0:
-        typer.secho(
-            "Error: --sub requires pairs of PATTERN REPLACEMENT.",
-            fg=typer.colors.RED,
-            err=True,
-        )
+        _fail("--sub requires pairs of PATTERN REPLACEMENT.")
         raise typer.Exit(code=1)
 
     substitutions = [(sub[i], sub[i + 1]) for i in range(0, len(sub), 2)]
@@ -66,6 +72,19 @@ def rename(
     result = rename_tensors(
         src=file, dst=dst, substitutions=substitutions, dry_run=dry_run
     )
+
+    if json_output:
+        data = {
+            "dry_run": dry_run,
+            "renamed": len(result.mappings),
+            "unchanged": result.unchanged,
+            "mappings": [
+                {"old": m.old_name, "new": m.new_name} for m in result.mappings
+            ],
+            "output_path": str(result.output_path) if not dry_run else None,
+        }
+        typer.echo(json.dumps(data, indent=2))
+        return
 
     if dry_run:
         if result.mappings:

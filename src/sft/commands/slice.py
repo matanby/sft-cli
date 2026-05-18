@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import typer
@@ -38,6 +39,11 @@ def slice_cmd(
         "--dry-run",
         help="Show what would be included/removed without writing.",
     ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Output a JSON report.",
+    ),
 ) -> None:
     """Extract tensors matching a pattern into a new file.
 
@@ -52,14 +58,24 @@ def slice_cmd(
     file = validate_safetensors(file)
 
     if include is None and exclude is None:
-        typer.secho(
-            "Error: At least one of --include or --exclude is required.",
-            fg=typer.colors.RED,
-            err=True,
-        )
+        msg = "At least one of --include or --exclude is required."
+        if json_output:
+            typer.echo(json.dumps({"error": msg}, indent=2))
+        else:
+            typer.secho(f"Error: {msg}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     result = slice_file(file, output, include=include, exclude=exclude, dry_run=dry_run)
+
+    if json_output:
+        data = {
+            "dry_run": dry_run,
+            "included": result.included,
+            "excluded": result.excluded,
+            "output_path": str(result.output_path) if not dry_run else None,
+        }
+        typer.echo(json.dumps(data, indent=2))
+        return
 
     if dry_run:
         typer.echo(f"Would keep {len(result.included)} tensor(s):")

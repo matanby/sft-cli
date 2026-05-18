@@ -143,6 +143,7 @@ import sft.commands.lora  # noqa: F401, E402
 import sft.commands.ls  # noqa: F401, E402
 import sft.commands.metadata  # noqa: F401, E402
 import sft.commands.rename  # noqa: F401, E402
+import sft.commands.skill  # noqa: F401, E402
 import sft.commands.slice  # noqa: F401, E402
 import sft.commands.split  # noqa: F401, E402
 import sft.commands.stat  # noqa: F401, E402
@@ -162,6 +163,11 @@ def check(
         "--skip-values",
         help="Skip NaN/Inf scan (faster for huge files).",
     ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Output as JSON.",
+    ),
 ) -> None:
     """Validate a .safetensors file's integrity and check for NaN/Inf values.
 
@@ -171,11 +177,12 @@ def check(
     Examples:
       sft check model.safetensors
       sft check model.safetensors --skip-values
+      sft check model.safetensors --json
     """
     file = validate_safetensors(file)
     from sft.commands.check import run
 
-    run(file, skip_values=skip_values)
+    run(file, skip_values=skip_values, json_output=json_output)
 
 
 def _entry() -> None:

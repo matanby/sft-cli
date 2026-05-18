@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import typer
@@ -33,6 +34,11 @@ def strip_cmd(
         "--dry-run",
         help="Show what would be included/removed without writing.",
     ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Output a JSON report.",
+    ),
 ) -> None:
     """Remove tensors matching a pattern from a file.
 
@@ -49,6 +55,16 @@ def strip_cmd(
     file = validate_safetensors(file)
 
     result = strip_file(file, output, exclude=exclude, dry_run=dry_run)
+
+    if json_output:
+        data = {
+            "dry_run": dry_run,
+            "included": result.included,
+            "excluded": result.excluded,
+            "output_path": str(result.output_path) if not dry_run else None,
+        }
+        typer.echo(json.dumps(data, indent=2))
+        return
 
     if dry_run:
         typer.echo(f"Would keep {len(result.included)} tensor(s):")

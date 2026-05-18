@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import typer
@@ -9,13 +10,32 @@ import typer
 from sft.ops.check import CheckResult, check_file
 
 
-def run(file: Path, *, skip_values: bool = False) -> None:
+def run(file: Path, *, skip_values: bool = False, json_output: bool = False) -> None:
     """Validate a .safetensors file and print results."""
     result = check_file(file, skip_values=skip_values)
-    _print_result(result)
+    if json_output:
+        _print_json(result)
+    else:
+        _print_result(result)
 
     if not result.healthy:
         raise typer.Exit(code=1)
+
+
+def _print_json(result: CheckResult) -> None:
+    data = {
+        "healthy": result.healthy,
+        "header_ok": result.header_ok,
+        "header_error": result.header_error or None,
+        "num_tensors": result.num_tensors,
+        "offsets_ok": result.offsets_ok,
+        "offsets_error": result.offsets_error or None,
+        "dtypes": result.dtypes,
+        "values_checked": result.values_checked,
+        "nan_tensors": result.nan_tensors,
+        "inf_tensors": result.inf_tensors,
+    }
+    typer.echo(json.dumps(data, indent=2))
 
 
 def _print_result(result: CheckResult) -> None:

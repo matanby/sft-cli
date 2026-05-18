@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import typer
@@ -34,6 +35,11 @@ def split(
         "--dry-run",
         help="Show shard distribution without writing files.",
     ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Output a JSON report.",
+    ),
 ) -> None:
     """Split a .safetensors file into smaller shards by size.
 
@@ -47,10 +53,16 @@ def split(
     """
     file = validate_safetensors(file)
 
+    def _fail(msg: str) -> None:
+        if json_output:
+            typer.echo(json.dumps({"error": msg}, indent=2))
+        else:
+            typer.secho(f"Error: {msg}", fg=typer.colors.RED, err=True)
+
     try:
         max_bytes = parse_size(max_size)
     except ValueError as exc:
-        typer.secho(f"Error: {exc}", fg=typer.colors.RED, err=True)
+        _fail(str(exc))
         raise typer.Exit(code=1) from None
 
     try:
@@ -61,8 +73,25 @@ def split(
             dry_run=dry_run,
         )
     except ValueError as exc:
-        typer.secho(f"Error: {exc}", fg=typer.colors.RED, err=True)
+        _fail(str(exc))
         raise typer.Exit(code=1) from None
+
+    if json_output:
+        data = {
+            "dry_run": dry_run,
+            "max_bytes": max_bytes,
+            "index_path": str(result.index_path) if result.index_path else None,
+            "shards": [
+                {
+                    "path": str(shard.path),
+                    "tensor_names": shard.tensor_names,
+                    "total_bytes": shard.total_bytes,
+                }
+                for shard in result.shards
+            ],
+        }
+        typer.echo(json.dumps(data, indent=2))
+        return
 
     if dry_run:
         typer.echo(f"Would create {len(result.shards)} shard(s):")

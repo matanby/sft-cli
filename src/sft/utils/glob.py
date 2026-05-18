@@ -30,13 +30,29 @@ def filter_tensors(
 
 
 def _glob_to_regex(pattern: str) -> str:
-    """Convert a dot-separated glob pattern to a regex.
+    """Convert a glob pattern to a regex for matching tensor names.
 
+    When the pattern contains a `.`, it uses dot-separated segment matching:
     - `*` matches a single segment (no dots)
     - `**` matches one or more segments (including dots)
     - `?` matches a single non-dot character
-    - `[abc]` character classes work within a segment
+
+    When the pattern has NO `.`, it uses simple wildcard matching where
+    `*` matches any characters (including dots). This allows intuitive
+    patterns like `*lora_A*` to match across segments.
     """
+    if "." not in pattern:
+        # Simple wildcard mode: * matches anything, ? matches one char
+        regex = ""
+        for ch in pattern:
+            if ch == "*":
+                regex += ".*"
+            elif ch == "?":
+                regex += "."
+            else:
+                regex += re.escape(ch)
+        return regex
+
     parts = pattern.split(".")
     regex_parts: list[str] = []
     for part in parts:

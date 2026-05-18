@@ -8,8 +8,14 @@ from pathlib import Path
 import typer
 
 from sft.cli import app, validate_safetensors
-from sft.ops.diff import TensorDiff, diff_files
+from sft.ops.diff import DEFAULT_ATOL, DEFAULT_RTOL, TensorDiff, diff_files
 from sft.utils.formatting import format_bytes, format_dtype, format_shape
+
+_STATUS_COLORS = {
+    "equal": typer.colors.GREEN,
+    "close": typer.colors.CYAN,
+    "differ": typer.colors.RED,
+}
 
 
 def _print_structural(
@@ -57,21 +63,31 @@ def _print_delta(diff: TensorDiff) -> None:
     if diff.value_diffs is None:
         return
 
-    header = f"{'Tensor':<45}{'L2 norm(Δ)':>12}  {'cosine sim':>10}"
-    typer.echo(header)
-    changed = 0
-    total_cos = 0.0
-    for name, vd in diff.value_diffs.items():
-        typer.echo(f"{name:<45}{vd.l2_norm:>12.4f}  {vd.cosine_sim:>10.4f}")
-        total_cos += vd.cosine_sim
-        if vd.l2_norm > 0:
-            changed += 1
+    n_equal = len(diff.by_status("equal"))
+    n_close = len(diff.by_status("close"))
+    n_differ = len(diff.by_status("differ"))
 
-    total = len(diff.value_diffs)
-    avg_cos = total_cos / total if total else 0.0
-    typer.echo(
-        f"Summary: {changed}/{total} tensors changed, avg cosine similarity {avg_cos:.4f}"
+    typer.echo(f"rtol={diff.rtol:g}  atol={diff.atol:g}")
+    typer.echo()
+    typer.secho(f"  equal  {n_equal}", fg=_STATUS_COLORS["equal"])
+    typer.secho(f"  close  {n_close}", fg=_STATUS_COLORS["close"])
+    typer.secho(f"  differ {n_differ}", fg=_STATUS_COLORS["differ"])
+    typer.echo()
+
+    header = (
+        f"{'status':<8}{'tensor':<48}"
+        f"{'max_abs':>11}  {'mean_abs':>11}  {'rel_L2':>10}  {'cosine':>8}"
     )
+    typer.echo(header)
+    typer.echo("-" * len(header))
+    for name, vd in diff.value_diffs.items():
+        color = _STATUS_COLORS.get(vd.status)
+        line = (
+            f"{vd.status:<8}{name:<48}"
+            f"{vd.max_abs:>11.3e}  {vd.mean_abs:>11.3e}  "
+            f"{vd.rel_l2:>10.3e}  {vd.cosine_sim:>8.4f}"
+        )
+        typer.secho(line, fg=color)
 
 
 def _to_json(diff: TensorDiff) -> None:
@@ -89,8 +105,17 @@ def _to_json(diff: TensorDiff) -> None:
         "unchanged": diff.unchanged,
     }
     if diff.value_diffs is not None:
+        data["rtol"] = diff.rtol
+        data["atol"] = diff.atol
         data["value_diffs"] = {
-            name: {"l2_norm": vd.l2_norm, "cosine_sim": vd.cosine_sim}
+            name: {
+                "status": vd.status,
+                "max_abs": vd.max_abs,
+                "mean_abs": vd.mean_abs,
+                "l2_norm": vd.l2_norm,
+                "rel_l2": vd.rel_l2,
+                "cosine_sim": vd.cosine_sim,
+            }
             for name, vd in diff.value_diffs.items()
         }
     typer.echo(json.dumps(data, indent=2))
@@ -111,7 +136,17 @@ def diff_cmd(
     delta: bool = typer.Option(
         False,
         "--delta",
-        help="Compute value-level differences (L2 norm, cosine similarity).",
+        help="Compute value-level differences (max_abs, mean_abs, L2, rel_L2, cosine).",
+    ),
+    rtol: float = typer.Option(
+        DEFAULT_RTOL,
+        "--rtol",
+        help="Relative tolerance for the 'close' classification (used with --delta).",
+    ),
+    atol: float = typer.Option(
+        DEFAULT_ATOL,
+        "--atol",
+        help="Absolute tolerance for the 'close' classification (used with --delta).",
     ),
     json_output: bool = typer.Option(
         False,
@@ -132,11 +167,17 @@ def diff_cmd(
     """Compare two .safetensors files and show structural or value differences.
 
     Shows added/removed tensors, shape changes, and dtype changes.
-    Use --delta for numerical comparison (L2 norm, cosine similarity).
+
+    With --delta, also computes per-tensor numerical metrics for every tensor
+    that shares name + shape + dtype between both files: max_abs, mean_abs,
+    L2 (Frobenius of the difference), rel_L2 (L2 / ||a||), and cosine sim.
+    Each comparable tensor is classified as `equal` (bitwise identical),
+    `close` (within rtol/atol via numpy.allclose), or `differ`.
 
     Examples:
       sft diff base.safetensors finetuned.safetensors
       sft diff v1.safetensors v2.safetensors --delta
+      sft diff v1.safetensors v2.safetensors --delta --rtol 1e-3
       sft diff a.safetensors b.safetensors --include='**.weight' --json
     """
     file_a = validate_safetensors(file_a)
@@ -155,6 +196,8 @@ def diff_cmd(
         compute_delta=delta,
         include=include,
         exclude=exclude,
+        rtol=rtol,
+        atol=atol,
     )
 
     if json_output:

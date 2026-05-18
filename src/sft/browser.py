@@ -963,7 +963,18 @@ class DiffFilePickerScreen(ModalScreen):
 
 
 class DiffResultScreen(ModalScreen):
-    """Show the result of comparing two safetensors files as a table."""
+    """Show the result of comparing two safetensors files as a table.
+
+    Rows are classified into five buckets:
+
+      • equal / close / differ — comparable tensors (same name+shape+dtype),
+        with per-tensor metrics: max_abs, rel_L2, cosine. The boundary
+        between close/differ is rtol/atol-based (numpy.allclose).
+      • incompatible — same name but shape or dtype differs.
+      • missing — present in only one file.
+
+    Filter keys (a/d/e/m/i) toggle which categories are visible.
+    """
 
     CSS = """
     DiffResultScreen {
@@ -1004,16 +1015,26 @@ class DiffResultScreen(ModalScreen):
     """
 
     STATUS_STYLES = {
-        "added": "yellow",
-        "removed": "yellow",
-        "shape": "red",
-        "dtype": "magenta",
-        "unchanged": "green",
+        "equal": "green",
+        "close": "cyan",
+        "differ": "red",
+        "incompatible": "magenta",
+        "missing": "yellow",
     }
+
+    # Default visibility: hide "equal" (which is the bulk of any diff) so the
+    # user sees changes first. They can press `a` to show everything.
+    _DEFAULT_VISIBLE: frozenset[str] = frozenset(
+        {"close", "differ", "incompatible", "missing"}
+    )
 
     BINDINGS = [
         Binding("escape", "dismiss", "Close"),
-        Binding("d", "dismiss", "Close"),
+        Binding("a", "filter_all", "All", show=True),
+        Binding("d", "filter_differ", "Differ", show=True),
+        Binding("e", "filter_equal", "Equal", show=True),
+        Binding("m", "filter_missing", "Missing", show=True),
+        Binding("i", "filter_incompatible", "Incompatible", show=True),
     ]
 
     def __init__(self, file_a: Path, file_b: Path) -> None:
@@ -1021,6 +1042,10 @@ class DiffResultScreen(ModalScreen):
         self.file_a = file_a
         self.file_b = file_b
         self._loaded = False
+        # Internal row model — populated by the worker, then filtered for display.
+        self._rows: list[tuple[str, str, str, str, str, str]] = []
+        # Active filter (which statuses to show)
+        self._visible: set[str] = set(self._DEFAULT_VISIBLE)
 
     def compose(self) -> ComposeResult:
         with Container(id="diff-container"):
@@ -1032,7 +1057,10 @@ class DiffResultScreen(ModalScreen):
             table: DataTable = DataTable(id="diff-table", zebra_stripes=True)
             table.cursor_type = "row"
             yield table
-            yield Static("[dim]esc / d: close[/dim]", id="diff-footer")
+            yield Static(
+                "[dim]a/d/e/m/i: filter \u2022 esc: close[/dim]",
+                id="diff-footer",
+            )
 
     def on_mount(self) -> None:
         self._run_diff()
@@ -1042,56 +1070,135 @@ class DiffResultScreen(ModalScreen):
         from sft.ops.diff import diff_files
 
         try:
-            result = diff_files(self.file_a, self.file_b)
+            result = diff_files(self.file_a, self.file_b, compute_delta=True)
         except Exception as e:
             self.app.call_from_thread(
                 self.notify, f"Diff failed: {e}", severity="error"
             )
             self.app.call_from_thread(self.dismiss, None)
             return
-        self.app.call_from_thread(self._show_result, result)
+        self.app.call_from_thread(self._populate_rows, result)
 
-    def _show_result(self, result) -> None:
-        table = self.query_one("#diff-table", DataTable)
-        table.add_columns("Status", "Tensor", "Detail")
+    def _populate_rows(self, result) -> None:
+        """Build the in-memory row model from a diff result and render."""
+        self._rows = []
 
-        rows: list[tuple[str, str, str]] = []
+        # Comparable tensors — each has a precise equal/close/differ status
+        if result.value_diffs is not None:
+            for name, vd in result.value_diffs.items():
+                self._rows.append(
+                    (
+                        vd.status,
+                        name,
+                        f"max_abs={vd.max_abs:.3e}",
+                        f"{vd.rel_l2:.3e}",
+                        f"{vd.cosine_sim:.4f}",
+                        "",
+                    )
+                )
+
+        # Incompatible — shape or dtype mismatch on same name
+        for name, (sa, sb) in result.shape_changed.items():
+            self._rows.append(
+                (
+                    "incompatible",
+                    name,
+                    f"shape {sa}\u2192{sb}",
+                    "-",
+                    "-",
+                    "",
+                )
+            )
+        for name, (da, db) in result.dtype_changed.items():
+            self._rows.append(
+                (
+                    "incompatible",
+                    name,
+                    f"dtype {da}\u2192{db}",
+                    "-",
+                    "-",
+                    "",
+                )
+            )
+
+        # Missing — present in only one file
         for name in result.added:
-            rows.append(("added", name, "only in B"))
+            self._rows.append(("missing", name, "only in B", "-", "-", ""))
         for name in result.removed:
-            rows.append(("removed", name, "only in A"))
-        for name, (a, b) in result.shape_changed.items():
-            rows.append(("shape", name, f"{a} \u2192 {b}"))
-        for name, (a, b) in result.dtype_changed.items():
-            rows.append(("dtype", name, f"{a} \u2192 {b}"))
-        for name in result.unchanged:
-            rows.append(("unchanged", name, ""))
+            self._rows.append(("missing", name, "only in A", "-", "-", ""))
 
-        for status, name, detail in rows:
+        # Counts for the summary line
+        self._counts = {
+            "equal": sum(1 for r in self._rows if r[0] == "equal"),
+            "close": sum(1 for r in self._rows if r[0] == "close"),
+            "differ": sum(1 for r in self._rows if r[0] == "differ"),
+            "incompatible": sum(1 for r in self._rows if r[0] == "incompatible"),
+            "missing": sum(1 for r in self._rows if r[0] == "missing"),
+        }
+
+        # Set up table columns once
+        table = self.query_one("#diff-table", DataTable)
+        if not table.columns:
+            table.add_columns("Status", "Tensor", "Detail", "rel_L2", "cosine", "")
+
+        self._loaded = True
+        self._refresh_view()
+        table.focus()
+
+    def _refresh_view(self) -> None:
+        """Re-render the table from `self._rows` filtered by `self._visible`.
+
+        Named `_refresh_view` (not `_render`) to avoid shadowing
+        `textual.widget.Widget._render`, which would break screen mounting.
+        """
+        table = self.query_one("#diff-table", DataTable)
+        table.clear()
+        for status, name, detail, rel, cos, _ in self._rows:
+            if status not in self._visible:
+                continue
             color = self.STATUS_STYLES.get(status, "white")
             table.add_row(
                 Text(status, style=color),
                 name,
                 detail,
+                rel,
+                cos,
+                "",
             )
 
+        # Update summary
         summary = self.query_one("#diff-summary", Static)
-        n_diff = (
-            len(result.added)
-            + len(result.removed)
-            + len(result.shape_changed)
-            + len(result.dtype_changed)
-        )
+        c = self._counts
+        active = ", ".join(sorted(self._visible)) if self._visible else "none"
         summary.update(
-            f"[yellow]added:[/yellow] {len(result.added)}   "
-            f"[yellow]removed:[/yellow] {len(result.removed)}   "
-            f"[red]shape:[/red] {len(result.shape_changed)}   "
-            f"[magenta]dtype:[/magenta] {len(result.dtype_changed)}   "
-            f"[green]unchanged:[/green] {len(result.unchanged)}   "
-            f"[bold]total diff:[/bold] {n_diff}"
+            f"[green]equal:[/green] {c['equal']}   "
+            f"[cyan]close:[/cyan] {c['close']}   "
+            f"[red]differ:[/red] {c['differ']}   "
+            f"[magenta]incompatible:[/magenta] {c['incompatible']}   "
+            f"[yellow]missing:[/yellow] {c['missing']}   "
+            f"[dim]\u2022 showing: {active}[/dim]"
         )
-        self._loaded = True
-        table.focus()
+
+    def _set_filter(self, statuses: set[str]) -> None:
+        self._visible = statuses
+        if self._loaded:
+            self._refresh_view()
+
+    def action_filter_all(self) -> None:
+        self._set_filter({"equal", "close", "differ", "incompatible", "missing"})
+
+    def action_filter_differ(self) -> None:
+        self._set_filter({"differ"})
+
+    def action_filter_equal(self) -> None:
+        # "equal" filter shows both bitwise-equal and within-tolerance tensors
+        self._set_filter({"equal", "close"})
+
+    def action_filter_missing(self) -> None:
+        self._set_filter({"missing"})
+
+    def action_filter_incompatible(self) -> None:
+        self._set_filter({"incompatible"})
 
 
 class LoraModeScreen(Screen):

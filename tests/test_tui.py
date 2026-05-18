@@ -517,6 +517,119 @@ def test_diff_full_flow(tmp_path: Path) -> None:
     asyncio.run(_run())
 
 
+def test_diff_screen_categorizes_with_value_metrics(tmp_path: Path) -> None:
+    """The diff screen classifies tensors into equal/close/differ/incompatible/missing."""
+    from sft.browser import DiffResultScreen, SftApp
+
+    p1 = tmp_path / "a.safetensors"
+    p2 = tmp_path / "b.safetensors"
+    save_file(
+        {
+            "identical": np.ones((4, 4), dtype=np.float32),
+            "different": np.zeros((4, 4), dtype=np.float32),
+            "only_in_a": np.eye(3, dtype=np.float32),
+            "shape_mismatch": np.zeros((4, 4), dtype=np.float32),
+        },
+        str(p1),
+    )
+    save_file(
+        {
+            "identical": np.ones((4, 4), dtype=np.float32),
+            "different": np.ones((4, 4), dtype=np.float32),
+            "only_in_b": np.eye(2, dtype=np.float32),
+            "shape_mismatch": np.zeros((8, 8), dtype=np.float32),
+        },
+        str(p2),
+    )
+
+    async def _run() -> None:
+        app = SftApp(p1)
+        async with app.run_test() as pilot:
+            await pilot.press("D")
+            await pilot.pause()
+            app.screen.dismiss(p2)
+            for _ in range(60):
+                await pilot.pause()
+                if isinstance(app.screen, DiffResultScreen) and app.screen._loaded:
+                    break
+            assert isinstance(app.screen, DiffResultScreen)
+            c = app.screen._counts
+            assert c["equal"] == 1  # "identical"
+            assert c["differ"] == 1  # "different"
+            assert c["incompatible"] == 1  # "shape_mismatch"
+            assert c["missing"] == 2  # only_in_a + only_in_b
+
+    asyncio.run(_run())
+
+
+def test_diff_screen_filter_keys(tmp_path: Path) -> None:
+    """Pressing a/d/e/m/i toggles which categories show in the diff table."""
+    from sft.browser import DiffResultScreen, SftApp
+
+    p1 = tmp_path / "a.safetensors"
+    p2 = tmp_path / "b.safetensors"
+    save_file(
+        {
+            "same": np.ones((4, 4), dtype=np.float32),
+            "diff": np.zeros((4, 4), dtype=np.float32),
+            "gone": np.eye(3, dtype=np.float32),
+        },
+        str(p1),
+    )
+    save_file(
+        {
+            "same": np.ones((4, 4), dtype=np.float32),
+            "diff": np.ones((4, 4), dtype=np.float32),
+            "added": np.eye(2, dtype=np.float32),
+        },
+        str(p2),
+    )
+
+    async def _run() -> None:
+        app = SftApp(p1)
+        async with app.run_test() as pilot:
+            await pilot.press("D")
+            await pilot.pause()
+            app.screen.dismiss(p2)
+            for _ in range(60):
+                await pilot.pause()
+                if isinstance(app.screen, DiffResultScreen) and app.screen._loaded:
+                    break
+            screen = app.screen
+            assert isinstance(screen, DiffResultScreen)
+
+            # Default visibility excludes "equal"
+            assert "equal" not in screen._visible
+
+            await pilot.press("a")  # show all
+            await pilot.pause()
+            assert screen._visible == {
+                "equal",
+                "close",
+                "differ",
+                "incompatible",
+                "missing",
+            }
+
+            await pilot.press("d")  # only differ
+            await pilot.pause()
+            assert screen._visible == {"differ"}
+
+            await pilot.press("e")  # equal + close
+            await pilot.pause()
+            assert screen._visible == {"equal", "close"}
+
+            await pilot.press("m")  # only missing
+            await pilot.pause()
+            assert screen._visible == {"missing"}
+
+            await pilot.press("i")  # only incompatible
+            await pilot.pause()
+            assert screen._visible == {"incompatible"}
+
+    asyncio.run(_run())
+
+
 def test_diff_rejects_same_file(lora_adapter: Path) -> None:
     from sft.browser import DiffFilePickerScreen, SftApp
 

@@ -11,18 +11,37 @@ from sft.index import TensorIndex
 from sft.utils.glob import filter_tensors
 from sft.utils.tensor_io import read_tensors
 
+# Default tolerances mirror numpy.allclose defaults; used to classify
+# value diffs as "close" vs "differ".
+DEFAULT_RTOL = 1e-5
+DEFAULT_ATOL = 1e-8
+
 
 @dataclass
 class ValueDiff:
-    """Numerical difference between two tensors with the same name/shape/dtype."""
+    """Numerical difference between two tensors with the same name/shape/dtype.
 
-    l2_norm: float
+    `status` is one of "equal" (max_abs == 0), "close" (within rtol/atol per
+    numpy.allclose), or "differ" (outside tolerances).
+    """
+
+    status: str  # "equal" | "close" | "differ"
+    max_abs: float  # max |a - b|
+    mean_abs: float  # mean |a - b|
+    l2_norm: float  # ||a - b||  (Frobenius)
+    rel_l2: float  # ||a - b|| / ||a||  (0 if ||a|| == 0)
     cosine_sim: float
 
 
 @dataclass
 class TensorDiff:
-    """Result of comparing two safetensors files."""
+    """Result of comparing two safetensors files.
+
+    Structural buckets (always populated): `added`, `removed`, `shape_changed`,
+    `dtype_changed`, `unchanged`. When `compute_delta=True`, `value_diffs`
+    maps each comparable tensor (in `unchanged`) to per-tensor metrics with a
+    status classification (`equal`/`close`/`differ`).
+    """
 
     added: list[str]
     removed: list[str]
@@ -30,21 +49,48 @@ class TensorDiff:
     dtype_changed: dict[str, tuple[str, str]]
     unchanged: list[str]
     value_diffs: dict[str, ValueDiff] | None = field(default=None)
+    rtol: float = DEFAULT_RTOL
+    atol: float = DEFAULT_ATOL
+
+    def by_status(self, status: str) -> list[str]:
+        """Names of comparable tensors with the given value-diff status."""
+        if self.value_diffs is None:
+            return []
+        return [n for n, vd in self.value_diffs.items() if vd.status == status]
 
 
-def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    a_flat = a.flatten().astype(np.float64)
-    b_flat = b.flatten().astype(np.float64)
-    norm_a = np.linalg.norm(a_flat)
-    norm_b = np.linalg.norm(b_flat)
+def _value_diff(a: np.ndarray, b: np.ndarray, rtol: float, atol: float) -> ValueDiff:
+    """Compute all numeric diff metrics + tolerance-based status for one pair."""
+    a64 = a.astype(np.float64).flatten()
+    b64 = b.astype(np.float64).flatten()
+    delta = a64 - b64
+
+    max_abs = float(np.max(np.abs(delta))) if delta.size else 0.0
+    mean_abs = float(np.mean(np.abs(delta))) if delta.size else 0.0
+    l2 = float(np.linalg.norm(delta))
+    norm_a = float(np.linalg.norm(a64))
+    rel_l2 = l2 / norm_a if norm_a > 0 else 0.0
+
+    norm_b = float(np.linalg.norm(b64))
     if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return float(np.dot(a_flat, b_flat) / (norm_a * norm_b))
+        cosine = 0.0
+    else:
+        cosine = float(np.dot(a64, b64) / (norm_a * norm_b))
 
+    if max_abs == 0:
+        status = "equal"
+    elif np.allclose(a64, b64, rtol=rtol, atol=atol):
+        status = "close"
+    else:
+        status = "differ"
 
-def _l2_norm_delta(a: np.ndarray, b: np.ndarray) -> float:
-    return float(
-        np.linalg.norm(a.flatten().astype(np.float64) - b.flatten().astype(np.float64))
+    return ValueDiff(
+        status=status,
+        max_abs=max_abs,
+        mean_abs=mean_abs,
+        l2_norm=l2,
+        rel_l2=rel_l2,
+        cosine_sim=cosine,
     )
 
 
@@ -55,8 +101,16 @@ def diff_files(
     compute_delta: bool = False,
     include: str | None = None,
     exclude: str | None = None,
+    rtol: float = DEFAULT_RTOL,
+    atol: float = DEFAULT_ATOL,
 ) -> TensorDiff:
-    """Compare two safetensors files and return a structured diff."""
+    """Compare two safetensors files and return a structured diff.
+
+    When `compute_delta=True`, also computes per-tensor numeric metrics
+    (`max_abs`, `mean_abs`, `l2_norm`, `rel_l2`, `cosine_sim`) for every
+    tensor that shares name, shape, and dtype, and classifies each as
+    `equal` / `close` (per `rtol`/`atol`) / `differ`.
+    """
     index_a = TensorIndex.from_file(path_a)
     index_b = TensorIndex.from_file(path_b)
 
@@ -97,9 +151,9 @@ def diff_files(
         tensors_b = read_tensors(path_b)
         value_diffs = {}
         for name in comparable:
-            l2 = _l2_norm_delta(tensors_a[name], tensors_b[name])
-            cos = _cosine_similarity(tensors_a[name], tensors_b[name])
-            value_diffs[name] = ValueDiff(l2_norm=l2, cosine_sim=cos)
+            value_diffs[name] = _value_diff(
+                tensors_a[name], tensors_b[name], rtol=rtol, atol=atol
+            )
 
     return TensorDiff(
         added=added,
@@ -108,4 +162,6 @@ def diff_files(
         dtype_changed=dtype_changed,
         unchanged=unchanged,
         value_diffs=value_diffs,
+        rtol=rtol,
+        atol=atol,
     )

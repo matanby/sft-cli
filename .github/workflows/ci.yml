@@ -38,7 +38,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python-version: ["3.9", "3.11", "3.12"]
+        python-version: ["3.9", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
 
@@ -61,7 +61,7 @@ jobs:
     # Long-running tests (subprocess E2E, perf smoke, build-hook) only need
     # to pass on one cell — they exercise behavior that's OS- and version-
     # independent.
-    name: slow tests (py3.12 / ubuntu)
+    name: slow tests (py3.14 / ubuntu)
     runs-on: ubuntu-latest
     needs: test
     steps:
@@ -71,7 +71,7 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Set up Python
-        run: uv python install 3.12
+        run: uv python install 3.14
 
       - name: Install dependencies
         run: uv sync --dev
@@ -93,7 +93,7 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Set up Python
-        run: uv python install 3.12
+        run: uv python install 3.14
 
       - name: Build package
         run: uv build

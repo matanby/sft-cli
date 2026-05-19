@@ -740,6 +740,8 @@ class LoraSortMode(Enum):
     RANK_ASC = "rank ↑"
     EFF_RANK_DESC = "eff. rank ↓"
     EFF_RANK_ASC = "eff. rank ↑"
+    SV95_DESC = "sv95 ↓"
+    SV95_ASC = "sv95 ↑"
     NORM_A_DESC = "‖A‖ ↓"
     NORM_A_ASC = "‖A‖ ↑"
     NORM_B_DESC = "‖B‖ ↓"
@@ -753,6 +755,8 @@ LORA_SORT_ORDER = [
     LoraSortMode.RANK_ASC,
     LoraSortMode.EFF_RANK_DESC,
     LoraSortMode.EFF_RANK_ASC,
+    LoraSortMode.SV95_DESC,
+    LoraSortMode.SV95_ASC,
     LoraSortMode.NORM_A_DESC,
     LoraSortMode.NORM_A_ASC,
     LoraSortMode.NORM_B_DESC,
@@ -1332,11 +1336,25 @@ class LoraModeScreen(Screen):
         LoraSortMode.RANK_ASC: ("rank", " ↑"),
         LoraSortMode.EFF_RANK_DESC: ("eff_rank", " ↓"),
         LoraSortMode.EFF_RANK_ASC: ("eff_rank", " ↑"),
+        LoraSortMode.SV95_DESC: ("sv95", " ↓"),
+        LoraSortMode.SV95_ASC: ("sv95", " ↑"),
         LoraSortMode.NORM_A_DESC: ("norm_a", " ↓"),
         LoraSortMode.NORM_A_ASC: ("norm_a", " ↑"),
         LoraSortMode.NORM_B_DESC: ("norm_b", " ↓"),
         LoraSortMode.NORM_B_ASC: ("norm_b", " ↑"),
     }
+
+    _LORA_COLUMN_SORT: dict[str, tuple[LoraSortMode, LoraSortMode]] = {
+        "module": (LoraSortMode.MODULE_ASC, LoraSortMode.MODULE_DESC),
+        "rank": (LoraSortMode.RANK_ASC, LoraSortMode.RANK_DESC),
+        "eff_rank": (LoraSortMode.EFF_RANK_ASC, LoraSortMode.EFF_RANK_DESC),
+        "sv95": (LoraSortMode.SV95_ASC, LoraSortMode.SV95_DESC),
+        "norm_a": (LoraSortMode.NORM_A_ASC, LoraSortMode.NORM_A_DESC),
+        "norm_b": (LoraSortMode.NORM_B_ASC, LoraSortMode.NORM_B_DESC),
+    }
+
+    _SORT_MISSING_ASC = float("inf")
+    _SORT_MISSING_DESC = float("-inf")
 
     def on_mount(self) -> None:
         if self.lora_format == "peft" and self.lora_info:
@@ -1425,8 +1443,9 @@ class LoraModeScreen(Screen):
         mode = LORA_SORT_ORDER[self._sort_idx]
         pairs = list(self.lora_info.pairs)
 
-        def stat(name: str, key: str, default: float) -> float:
-            return self._stats.get(name, {}).get(key, default)
+        def stat(name: str, key: str, *, ascending: bool) -> float:
+            missing = self._SORT_MISSING_ASC if ascending else self._SORT_MISSING_DESC
+            return self._stats.get(name, {}).get(key, missing)
 
         if mode == LoraSortMode.MODULE_ASC:
             pairs.sort(key=lambda p: natural_sort_key(p.module_key))
@@ -1439,42 +1458,56 @@ class LoraModeScreen(Screen):
         elif mode == LoraSortMode.EFF_RANK_DESC:
             pairs.sort(
                 key=lambda p: (
-                    -stat(p.module_key, "eff_rank", 0.0),
+                    -stat(p.module_key, "eff_rank", ascending=False),
                     natural_sort_key(p.module_key),
                 )
             )
         elif mode == LoraSortMode.EFF_RANK_ASC:
             pairs.sort(
                 key=lambda p: (
-                    stat(p.module_key, "eff_rank", 0.0),
+                    stat(p.module_key, "eff_rank", ascending=True),
+                    natural_sort_key(p.module_key),
+                )
+            )
+        elif mode == LoraSortMode.SV95_DESC:
+            pairs.sort(
+                key=lambda p: (
+                    -stat(p.module_key, "sv95", ascending=False),
+                    natural_sort_key(p.module_key),
+                )
+            )
+        elif mode == LoraSortMode.SV95_ASC:
+            pairs.sort(
+                key=lambda p: (
+                    stat(p.module_key, "sv95", ascending=True),
                     natural_sort_key(p.module_key),
                 )
             )
         elif mode == LoraSortMode.NORM_A_DESC:
             pairs.sort(
                 key=lambda p: (
-                    -stat(p.module_key, "norm_a", 0.0),
+                    -stat(p.module_key, "norm_a", ascending=False),
                     natural_sort_key(p.module_key),
                 )
             )
         elif mode == LoraSortMode.NORM_A_ASC:
             pairs.sort(
                 key=lambda p: (
-                    stat(p.module_key, "norm_a", 0.0),
+                    stat(p.module_key, "norm_a", ascending=True),
                     natural_sort_key(p.module_key),
                 )
             )
         elif mode == LoraSortMode.NORM_B_DESC:
             pairs.sort(
                 key=lambda p: (
-                    -stat(p.module_key, "norm_b", 0.0),
+                    -stat(p.module_key, "norm_b", ascending=False),
                     natural_sort_key(p.module_key),
                 )
             )
         elif mode == LoraSortMode.NORM_B_ASC:
             pairs.sort(
                 key=lambda p: (
-                    stat(p.module_key, "norm_b", 0.0),
+                    stat(p.module_key, "norm_b", ascending=True),
                     natural_sort_key(p.module_key),
                 )
             )
@@ -1598,11 +1631,34 @@ class LoraModeScreen(Screen):
     def action_exit_mode(self) -> None:
         self.app.pop_screen()
 
+    def _set_sort_mode(self, mode: LoraSortMode) -> None:
+        if self.lora_format != "peft":
+            return
+        self._sort_idx = LORA_SORT_ORDER.index(mode)
+        self._refresh_table()
+
     def action_cycle_sort(self) -> None:
         if self.lora_format != "peft":
             return
         self._sort_idx = (self._sort_idx + 1) % len(LORA_SORT_ORDER)
         self._refresh_table()
+
+    def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
+        """Click a column header to toggle asc/desc for that metric."""
+        if self.lora_format != "peft" or event.control.id != "lora-table":
+            return
+        col_key = event.column_key.value
+        modes = self._LORA_COLUMN_SORT.get(col_key)
+        if modes is None:
+            return
+        asc, desc = modes
+        current = LORA_SORT_ORDER[self._sort_idx]
+        if current == asc:
+            self._set_sort_mode(desc)
+        elif current == desc:
+            self._set_sort_mode(asc)
+        else:
+            self._set_sort_mode(desc if col_key != "module" else asc)
 
     def on_data_table_row_selected(self, _event: DataTable.RowSelected) -> None:
         self.action_show_spectrum()

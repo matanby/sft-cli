@@ -69,8 +69,10 @@ def test_format_lora_module_display():
         == "diffusion_model.transformer_blocks.0.attn1.to_out.0"
     )
     assert (
-        format_lora_module_display("transformer.single_transformer_blocks.0")
-        == "transformer.single_transformer_blocks.0"
+        format_lora_module_display(
+            "diffusion_model.transformer_blocks.46.ff.net.0.proj"
+        )
+        == "diffusion_model.transformer_blocks.46.ff.net.0.proj"
     )
     assert (
         format_lora_module_display(
@@ -78,6 +80,18 @@ def test_format_lora_module_display():
         )
         == "lora_unet_down_blocks_2_attentions_0_transformer_blocks_0_attn1_to_k"
     )
+
+
+def test_format_lora_module_display_keeps_shared_prefix():
+    """Shallow and deep paths must not diverge in displayed prefix."""
+    shallow = format_lora_module_display(
+        "diffusion_model.transformer_blocks.46.audio_attn2.to_k"
+    )
+    deep = format_lora_module_display(
+        "diffusion_model.transformer_blocks.46.ff.net.0.proj"
+    )
+    assert shallow.startswith("diffusion_model.")
+    assert deep.startswith("diffusion_model.")
 
 
 def test_get_base_weight_name():

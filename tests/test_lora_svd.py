@@ -47,8 +47,8 @@ def test_svd_disambiguates_ambiguous_target_modules(tmp_path: Path):
     assert "transformer.single_transformer_blocks.0.attn.to_k" in display_names
     assert "transformer.single_transformer_blocks.0" in display_names
     assert "transformer.single_transformer_blocks.2.attn.to_v" in display_names
-    assert "0" not in display_names
     assert "to_k" not in display_names
+    assert display_names.count("0") == 0
 
 
 def test_svd_suggested_rank(lora_adapter: Path):

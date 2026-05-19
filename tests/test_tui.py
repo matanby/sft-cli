@@ -324,6 +324,156 @@ def test_lora_mode_stats_computed_in_background(lora_adapter: Path) -> None:
     asyncio.run(_run())
 
 
+def test_lora_mode_sort_by_sv95(lora_adapter: Path) -> None:
+    """SV95 sort puts loaded pairs in numeric order; pending pairs last."""
+    from sft.browser import LORA_SORT_ORDER, LoraModeScreen, LoraSortMode, SftApp
+
+    async def _run() -> None:
+        app = SftApp(lora_adapter)
+        async with app.run_test() as pilot:
+            await pilot.press("L")
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(app.screen, LoraModeScreen)
+
+            keys = [p.module_key for p in screen.lora_info.pairs]
+            screen._stats = {
+                keys[0]: {"sv95": 24},
+                keys[1]: {"sv95": 8},
+            }
+
+            screen._set_sort_mode(LoraSortMode.SV95_DESC)
+            desc = screen._sorted_pairs()
+            assert [p.module_key for p in desc] == [keys[0], keys[1]]
+
+            screen._set_sort_mode(LoraSortMode.SV95_ASC)
+            asc = screen._sorted_pairs()
+            assert [p.module_key for p in asc] == [keys[1], keys[0]]
+
+            screen._stats = {keys[0]: {"sv95": 12}}
+            screen._set_sort_mode(LoraSortMode.SV95_ASC)
+            pending_last = screen._sorted_pairs()
+            assert pending_last[0].module_key == keys[0]
+            assert pending_last[-1].module_key == keys[1]
+
+            assert LoraSortMode.SV95_DESC in LORA_SORT_ORDER
+            assert LoraSortMode.SV95_ASC in LORA_SORT_ORDER
+
+    asyncio.run(_run())
+
+
+def test_lora_mode_header_click_toggles_sv95_sort(lora_adapter: Path) -> None:
+    from textual.widgets import DataTable
+
+    from sft.browser import LORA_SORT_ORDER, LoraModeScreen, LoraSortMode, SftApp
+
+    async def _run() -> None:
+        app = SftApp(lora_adapter)
+        async with app.run_test() as pilot:
+            await pilot.press("L")
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(screen, LoraModeScreen)
+            table = screen.query_one("#lora-table", DataTable)
+
+            screen.on_data_table_header_selected(
+                DataTable.HeaderSelected(
+                    table,
+                    table.columns["sv95"].key,
+                    3,
+                    table.columns["sv95"].label,
+                )
+            )
+            assert LORA_SORT_ORDER[screen._sort_idx] == LoraSortMode.SV95_DESC
+
+            screen.on_data_table_header_selected(
+                DataTable.HeaderSelected(
+                    table,
+                    table.columns["sv95"].key,
+                    3,
+                    table.columns["sv95"].label,
+                )
+            )
+            assert LORA_SORT_ORDER[screen._sort_idx] == LoraSortMode.SV95_ASC
+
+    asyncio.run(_run())
+
+
+def test_lora_mode_sort_by_eff_rank(lora_adapter: Path) -> None:
+    """Eff. rank sort puts loaded pairs in numeric order; pending pairs last."""
+    from sft.browser import LORA_SORT_ORDER, LoraModeScreen, LoraSortMode, SftApp
+
+    async def _run() -> None:
+        app = SftApp(lora_adapter)
+        async with app.run_test() as pilot:
+            await pilot.press("L")
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(app.screen, LoraModeScreen)
+
+            keys = [p.module_key for p in screen.lora_info.pairs]
+            screen._stats = {
+                keys[0]: {"eff_rank": 3.0},
+                keys[1]: {"eff_rank": 1.0},
+            }
+
+            screen._set_sort_mode(LoraSortMode.EFF_RANK_DESC)
+            desc = screen._sorted_pairs()
+            assert [p.module_key for p in desc] == [keys[0], keys[1]]
+
+            screen._set_sort_mode(LoraSortMode.EFF_RANK_ASC)
+            asc = screen._sorted_pairs()
+            assert [p.module_key for p in asc] == [keys[1], keys[0]]
+
+            screen._stats = {keys[0]: {"eff_rank": 2.0}}
+            screen._set_sort_mode(LoraSortMode.EFF_RANK_ASC)
+            pending_last = screen._sorted_pairs()
+            assert pending_last[0].module_key == keys[0]
+            assert pending_last[-1].module_key == keys[1]
+
+            assert LoraSortMode.EFF_RANK_DESC in LORA_SORT_ORDER
+            assert LoraSortMode.EFF_RANK_ASC in LORA_SORT_ORDER
+
+    asyncio.run(_run())
+
+
+def test_lora_mode_header_click_toggles_eff_rank_sort(lora_adapter: Path) -> None:
+    from textual.widgets import DataTable
+
+    from sft.browser import LORA_SORT_ORDER, LoraModeScreen, LoraSortMode, SftApp
+
+    async def _run() -> None:
+        app = SftApp(lora_adapter)
+        async with app.run_test() as pilot:
+            await pilot.press("L")
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(screen, LoraModeScreen)
+            table = screen.query_one("#lora-table", DataTable)
+
+            screen.on_data_table_header_selected(
+                DataTable.HeaderSelected(
+                    table,
+                    table.columns["eff_rank"].key,
+                    2,
+                    table.columns["eff_rank"].label,
+                )
+            )
+            assert LORA_SORT_ORDER[screen._sort_idx] == LoraSortMode.EFF_RANK_DESC
+
+            screen.on_data_table_header_selected(
+                DataTable.HeaderSelected(
+                    table,
+                    table.columns["eff_rank"].key,
+                    2,
+                    table.columns["eff_rank"].label,
+                )
+            )
+            assert LORA_SORT_ORDER[screen._sort_idx] == LoraSortMode.EFF_RANK_ASC
+
+    asyncio.run(_run())
+
+
 def test_lora_mode_spectrum_drill_down(lora_adapter: Path) -> None:
     """Enter on a row inside LoRA Mode opens the spectrum modal."""
     from sft.browser import LoraModeScreen, SftApp, SvdSpectrumScreen

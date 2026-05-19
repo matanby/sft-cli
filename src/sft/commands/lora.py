@@ -115,6 +115,7 @@ def lora_info_cmd(
     """
     file = validate_safetensors(file)
 
+    from sft.ops.lora.detect import format_lora_module_display
     from sft.ops.lora.info import lora_info
 
     try:
@@ -153,7 +154,7 @@ def lora_info_cmd(
 
     typer.echo("Pairs:")
     for pair in info.pairs:
-        module_short = pair.module_key.split(".")[-2] + "." + pair.target_module
+        module_short = format_lora_module_display(pair.module_key)
         a_shape = "x".join(str(d) for d in pair.lora_a_shape)
         b_shape = "x".join(str(d) for d in pair.lora_b_shape)
         typer.echo(
@@ -516,6 +517,7 @@ def lora_svd_cmd(
             "threshold": analysis.threshold,
             "modules": [
                 {
+                    "module_key": m.module_key,
                     "module": m.module,
                     "rank": m.rank,
                     "sv_90": m.sv_90,
@@ -530,11 +532,16 @@ def lora_svd_cmd(
         typer.echo(json.dumps(data, indent=2))
         return
 
-    header = f"{'Module':<16}{'Rank':>6}{'SV 90%':>10}{'SV 95%':>10}{'SV 99%':>10}{'Suggested rank':>16}"
+    col_width = max(16, *(len(m.module) for m in analysis.modules))
+    header = (
+        f"{'Module':<{col_width}}{'Rank':>6}{'SV 90%':>10}{'SV 95%':>10}"
+        f"{'SV 99%':>10}{'Suggested rank':>16}"
+    )
     typer.echo(header)
     for m in analysis.modules:
         typer.echo(
-            f"{m.module:<16}{m.rank:>6}{m.sv_90:>10}{m.sv_95:>10}{m.sv_99:>10}{m.suggested_rank:>16}"
+            f"{m.module:<{col_width}}{m.rank:>6}{m.sv_90:>10}{m.sv_95:>10}"
+            f"{m.sv_99:>10}{m.suggested_rank:>16}"
         )
 
     typer.echo()

@@ -1399,8 +1399,9 @@ class LoraModeScreen(Screen):
             )
 
     def _short_module_name(self, pair: LoRAPair) -> str:
-        parts = pair.module_key.split(".")
-        return ".".join(parts[-4:]) if len(parts) > 4 else pair.module_key
+        from sft.ops.lora.detect import format_lora_module_display
+
+        return format_lora_module_display(pair.module_key)
 
     def _sorted_pairs(self) -> list[LoRAPair]:
         if self.lora_info is None:
@@ -1785,8 +1786,9 @@ class LoraInfoScreen(ModalScreen):
 
     @staticmethod
     def _short_pair_name(pair: LoRAPair) -> str:
-        parts = pair.module_key.split(".")
-        return ".".join(parts[-4:]) if len(parts) > 4 else pair.module_key
+        from sft.ops.lora.detect import format_lora_module_display
+
+        return format_lora_module_display(pair.module_key)
 
 
 class LoraResizePromptScreen(ModalScreen):

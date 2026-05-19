@@ -7,6 +7,7 @@ from pathlib import Path
 from sft.ops.lora.detect import (
     detect_lora,
     extract_target_module,
+    format_lora_module_display,
     get_base_weight_name,
     strip_peft_prefix,
 )
@@ -50,6 +51,27 @@ def test_extract_target_module():
         extract_target_module("base_model.model.layers.0.self_attn.q_proj") == "q_proj"
     )
     assert extract_target_module("layers.0.mlp.gate_proj") == "gate_proj"
+
+
+def test_format_lora_module_display():
+    assert (
+        format_lora_module_display("base_model.model.model.layers.0.self_attn.q_proj")
+        == "layers.0.self_attn.q_proj"
+    )
+    assert (
+        format_lora_module_display("transformer.single_transformer_blocks.0.attn.to_k")
+        == "single_transformer_blocks.0.attn.to_k"
+    )
+    assert (
+        format_lora_module_display("transformer.single_transformer_blocks.0")
+        == "transformer.single_transformer_blocks.0"
+    )
+    assert (
+        format_lora_module_display(
+            "lora_unet_down_blocks_2_attentions_0_transformer_blocks_0_attn1_to_k"
+        )
+        == "lora_unet_down_blocks_2_attentions_0_transformer_blocks_0_attn1_to_k"
+    )
 
 
 def test_get_base_weight_name():

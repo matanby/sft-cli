@@ -83,6 +83,20 @@ def extract_target_module(module_key: str) -> str:
     return parts[-1] if parts else module_key
 
 
+def format_lora_module_display(module_key: str, *, tail_parts: int = 4) -> str:
+    """Return a concise but unambiguous display name for a LoRA module key.
+
+    Strips the PEFT wrapper prefix and keeps the last *tail_parts* dot-separated
+    segments so layer/block context is visible (e.g. ``0.attn.to_k`` rather than
+    just ``to_k`` or ``0``).
+    """
+    name = strip_peft_prefix(module_key)
+    parts = name.split(".")
+    if len(parts) > tail_parts:
+        return ".".join(parts[-tail_parts:])
+    return name
+
+
 def detect_lora(path: Path) -> LoRAInfo | None:
     """Detect LoRA structure in a safetensors file.
 

@@ -19,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
-from sft.ops.lora.detect import detect_lora
+from sft.ops.lora.detect import detect_lora, format_lora_module_display
 from sft.utils.tensor_io import read_tensors
 
 
@@ -27,6 +27,7 @@ from sft.utils.tensor_io import read_tensors
 class ModuleSVDInfo:
     """SVD analysis results for a single LoRA module."""
 
+    module_key: str
     module: str
     rank: int
     singular_values: list[float]
@@ -127,7 +128,8 @@ def analyze_svd(path: Path, threshold: float = 0.95) -> SVDAnalysis:
 
         modules.append(
             ModuleSVDInfo(
-                module=pair.target_module,
+                module_key=pair.module_key,
+                module=format_lora_module_display(pair.module_key),
                 rank=pair.rank,
                 singular_values=s.tolist(),
                 sv_90=sv_90,

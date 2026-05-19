@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+from safetensors.numpy import save_file
 from typer.testing import CliRunner
 
 from sft.cli import app
@@ -17,9 +18,37 @@ runner = CliRunner()
 def test_svd_basic(lora_adapter: Path):
     analysis = analyze_svd(lora_adapter)
     module_names = [m.module for m in analysis.modules]
-    assert "q_proj" in module_names
-    assert "v_proj" in module_names
+    assert "layers.0.self_attn.q_proj" in module_names
+    assert "layers.0.self_attn.v_proj" in module_names
     assert len(analysis.modules) == 2
+
+
+def test_svd_disambiguates_ambiguous_target_modules(tmp_path: Path):
+    """Display names include layer/block context, not just the last segment."""
+    rank = 4
+    pairs = {
+        "transformer.single_transformer_blocks.0.attn.to_k": rank,
+        "transformer.single_transformer_blocks.0": rank,
+        "transformer.single_transformer_blocks.2.attn.to_v": rank,
+    }
+    tensors = {}
+    for module_key, r in pairs.items():
+        tensors[f"{module_key}.lora_A.weight"] = np.random.randn(r, 8).astype(
+            np.float32
+        )
+        tensors[f"{module_key}.lora_B.weight"] = np.random.randn(8, r).astype(
+            np.float32
+        )
+    path = tmp_path / "ambiguous.safetensors"
+    save_file(tensors, str(path), metadata={"rank": str(rank), "alpha": "8"})
+
+    analysis = analyze_svd(path)
+    display_names = [m.module for m in analysis.modules]
+    assert "single_transformer_blocks.0.attn.to_k" in display_names
+    assert "transformer.single_transformer_blocks.0" in display_names
+    assert "single_transformer_blocks.2.attn.to_v" in display_names
+    assert "0" not in display_names
+    assert "to_k" not in display_names
 
 
 def test_svd_suggested_rank(lora_adapter: Path):
@@ -43,6 +72,7 @@ def test_svd_json(lora_adapter: Path):
     assert "modules" in data
     assert len(data["modules"]) == 2
     for mod in data["modules"]:
+        assert "module_key" in mod
         assert "module" in mod
         assert "rank" in mod
         assert "sv_90" in mod

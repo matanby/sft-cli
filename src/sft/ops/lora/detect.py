@@ -83,7 +83,7 @@ def extract_target_module(module_key: str) -> str:
     return parts[-1] if parts else module_key
 
 
-def format_lora_module_display(module_key: str, *, tail_parts: int = 4) -> str:
+def format_lora_module_display(module_key: str, *, tail_parts: int = 6) -> str:
     """Return a concise but unambiguous display name for a LoRA module key.
 
     Strips the PEFT wrapper prefix and keeps the last *tail_parts* dot-separated

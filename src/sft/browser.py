@@ -1295,6 +1295,7 @@ class LoraModeScreen(Screen):
         self.lora_info = lora_info  # only populated for PEFT
         self._sort_idx = 0
         self._stats: dict[str, dict[str, float]] = {}
+        self._tensor_cache: dict | None = None
 
     def compose(self) -> ComposeResult:
         yield Footer()
@@ -1363,6 +1364,8 @@ class LoraModeScreen(Screen):
             self._compute_stats()
             self._update_sort_indicator()
 
+    _STATS_REFRESH_EVERY = 64
+
     def _title_line(self) -> str:
         fmt_label = self.lora_format.upper()
         return (
@@ -1397,6 +1400,19 @@ class LoraModeScreen(Screen):
                 "…",
                 key=pair.module_key,
             )
+        self._sync_module_column_width(table)
+
+    def _sync_module_column_width(self, table: DataTable) -> None:
+        if self.lora_info is None:
+            return
+        max_len = max(
+            (len(self._short_module_name(p)) for p in self.lora_info.pairs),
+            default=16,
+        )
+        col = table.columns.get("module")
+        if col is not None:
+            col.content_width = max(col.content_width, max_len)
+        table.refresh(layout=True)
 
     def _short_module_name(self, pair: LoRAPair) -> str:
         from sft.ops.lora.detect import format_lora_module_display
@@ -1510,6 +1526,7 @@ class LoraModeScreen(Screen):
                 new_cursor = i
         if table.row_count > 0:
             table.move_cursor(row=new_cursor)
+        self._sync_module_column_width(table)
         self._update_sort_indicator()
 
     @staticmethod
@@ -1542,17 +1559,20 @@ class LoraModeScreen(Screen):
             )
             return
 
-        for pair in self.lora_info.pairs:
+        self._tensor_cache = tensors
+        total = len(self.lora_info.pairs)
+
+        for i, pair in enumerate(self.lora_info.pairs):
             try:
                 a = tensors[pair.lora_a_name]
                 b = tensors[pair.lora_b_name]
 
                 (s,) = _qr_svd(a, b, compute_uv=False)
                 s_sq = s**2
-                total = float(s_sq.sum())
-                if total > 0:
-                    eff_rank = total / float(s_sq.max())
-                    cumvar = np.cumsum(s_sq) / total
+                total_energy = float(s_sq.sum())
+                if total_energy > 0:
+                    eff_rank = total_energy / float(s_sq.max())
+                    cumvar = np.cumsum(s_sq) / total_energy
                     sv95 = int(np.searchsorted(cumvar, 0.95)) + 1
                 else:
                     eff_rank = 0.0
@@ -1570,7 +1590,8 @@ class LoraModeScreen(Screen):
                 stats = {}
 
             self._stats[pair.module_key] = stats
-            self.app.call_from_thread(self._refresh_table)
+            if (i + 1) % self._STATS_REFRESH_EVERY == 0 or (i + 1) == total:
+                self.app.call_from_thread(self._refresh_table)
 
     # --- Actions ---
 
@@ -1963,8 +1984,11 @@ class SvdSpectrumScreen(ModalScreen):
         self.sv = [float(v) for v in singular_values]
 
     def compose(self) -> ComposeResult:
+        from sft.ops.lora.detect import format_lora_module_display
+
+        module_label = format_lora_module_display(self.pair.module_key)
         with Container(id="svd-container"):
-            yield Label(f"SVD Spectrum — {self.pair.target_module}", id="svd-title")
+            yield Label(f"SVD Spectrum — {module_label}", id="svd-title")
             yield Static(
                 f"[dim]Module:[/dim] {self.pair.module_key}\n"
                 f"[dim]Rank:[/dim] {self.pair.rank}   "

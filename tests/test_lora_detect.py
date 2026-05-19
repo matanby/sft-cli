@@ -56,11 +56,17 @@ def test_extract_target_module():
 def test_format_lora_module_display():
     assert (
         format_lora_module_display("base_model.model.model.layers.0.self_attn.q_proj")
-        == "layers.0.self_attn.q_proj"
+        == "model.layers.0.self_attn.q_proj"
     )
     assert (
         format_lora_module_display("transformer.single_transformer_blocks.0.attn.to_k")
-        == "single_transformer_blocks.0.attn.to_k"
+        == "transformer.single_transformer_blocks.0.attn.to_k"
+    )
+    assert (
+        format_lora_module_display(
+            "diffusion_model.transformer_blocks.0.attn1.to_out.0"
+        )
+        == "diffusion_model.transformer_blocks.0.attn1.to_out.0"
     )
     assert (
         format_lora_module_display("transformer.single_transformer_blocks.0")

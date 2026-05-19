@@ -18,8 +18,8 @@ runner = CliRunner()
 def test_svd_basic(lora_adapter: Path):
     analysis = analyze_svd(lora_adapter)
     module_names = [m.module for m in analysis.modules]
-    assert "layers.0.self_attn.q_proj" in module_names
-    assert "layers.0.self_attn.v_proj" in module_names
+    assert "model.layers.0.self_attn.q_proj" in module_names
+    assert "model.layers.0.self_attn.v_proj" in module_names
     assert len(analysis.modules) == 2
 
 
@@ -44,9 +44,9 @@ def test_svd_disambiguates_ambiguous_target_modules(tmp_path: Path):
 
     analysis = analyze_svd(path)
     display_names = [m.module for m in analysis.modules]
-    assert "single_transformer_blocks.0.attn.to_k" in display_names
+    assert "transformer.single_transformer_blocks.0.attn.to_k" in display_names
     assert "transformer.single_transformer_blocks.0" in display_names
-    assert "single_transformer_blocks.2.attn.to_v" in display_names
+    assert "transformer.single_transformer_blocks.2.attn.to_v" in display_names
     assert "0" not in display_names
     assert "to_k" not in display_names
 

@@ -113,7 +113,7 @@ def stat(
       sft stat model.safetensors --include='*lora*' --json
       sft stat model.safetensors --check
     """
-    file = validate_safetensors(file)
+    file = validate_safetensors(file, json_output=json_output)
     results = compute_stats(file, include=include, exclude=exclude)
 
     if not check:

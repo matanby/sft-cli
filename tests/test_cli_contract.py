@@ -175,16 +175,6 @@ def test_command_json_happy_path_parses(
 # ---------- 4. --json error contract (currently a partial contract) ----------
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Documented in AGENTS.md but not yet enforced in every command: "
-        "errors raised under --json should be emitted as JSON "
-        "({'error': '...'}). validate_safetensors() prints a plain "
-        "stderr message and exits. Tracked as a gap; this xfail "
-        "flips to pass when the contract is fully implemented."
-    ),
-    strict=False,
-)
 @pytest.mark.parametrize("path", JSON_HAPPY_COMMANDS, ids=lambda p: " ".join(p))
 def test_command_json_error_is_json(path: list[str], tmp_path: Path) -> None:
     fake = tmp_path / "does_not_exist.safetensors"

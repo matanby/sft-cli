@@ -60,7 +60,7 @@ def metadata(
       sft metadata model.safetensors --set format=pt --set version=2.0
       sft metadata model.safetensors --unset format
     """
-    file = validate_safetensors(file)
+    file = validate_safetensors(file, json_output=json_output)
 
     is_write = bool(set_pairs) or bool(unset_keys)
 

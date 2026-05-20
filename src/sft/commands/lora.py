@@ -113,7 +113,7 @@ def lora_info_cmd(
       sft lora info adapter.safetensors
       sft lora info adapter.safetensors --json
     """
-    file = validate_safetensors(file)
+    file = validate_safetensors(file, json_output=json_output)
 
     from sft.ops.lora.detect import format_lora_module_display
     from sft.ops.lora.info import lora_info
@@ -121,7 +121,12 @@ def lora_info_cmd(
     try:
         info = lora_info(file)
     except ValueError as e:
-        typer.secho(f"Error: {e}", fg=typer.colors.RED, err=True)
+        if json_output:
+            import json as json_lib
+
+            typer.echo(json_lib.dumps({"error": str(e)}, indent=2))
+        else:
+            typer.secho(f"Error: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from None
 
     if json_output:

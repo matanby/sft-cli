@@ -39,17 +39,32 @@ def main(
     """The Swiss army knife for .safetensors files."""
 
 
-def validate_safetensors(path: Path) -> Path:
+def validate_safetensors(path: Path, json_output: bool = False) -> Path:
     """Validate that a path points to a readable .safetensors file."""
     if not path.exists():
-        typer.secho(f"Error: File not found: {path}", fg=typer.colors.RED, err=True)
+        if json_output:
+            import json as json_lib
+
+            typer.echo(json_lib.dumps({"error": f"File not found: {path}"}, indent=2))
+        else:
+            typer.secho(f"Error: File not found: {path}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
     if path.suffix.lower() != ".safetensors":
-        typer.secho(
-            f"Error: Expected a .safetensors file, got '{path.suffix}'",
-            fg=typer.colors.RED,
-            err=True,
-        )
+        if json_output:
+            import json as json_lib
+
+            typer.echo(
+                json_lib.dumps(
+                    {"error": f"Expected a .safetensors file, got '{path.suffix}'"},
+                    indent=2,
+                )
+            )
+        else:
+            typer.secho(
+                f"Error: Expected a .safetensors file, got '{path.suffix}'",
+                fg=typer.colors.RED,
+                err=True,
+            )
         raise typer.Exit(code=1)
     return path
 
@@ -111,7 +126,7 @@ def info(
       sft info model.safetensors
       sft info model.safetensors --json
     """
-    file = validate_safetensors(file)
+    file = validate_safetensors(file, json_output=json)
     from sft.commands.info import run
 
     run(file, json_output=json)
@@ -179,7 +194,7 @@ def check(
       sft check model.safetensors --skip-values
       sft check model.safetensors --json
     """
-    file = validate_safetensors(file)
+    file = validate_safetensors(file, json_output=json_output)
     from sft.commands.check import run
 
     run(file, skip_values=skip_values, json_output=json_output)

@@ -89,7 +89,7 @@ def tree_cmd(
       sft tree model.safetensors --depth 3
       sft tree model.safetensors --json
     """
-    file = validate_safetensors(file)
+    file = validate_safetensors(file, json_output=json_output)
     if json_output:
         typer.echo(_render_tree_json(file, max_depth=depth))
     else:

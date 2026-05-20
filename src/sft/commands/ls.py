@@ -102,7 +102,7 @@ def ls(
       sft ls *.safetensors --sort=size
       sft ls shard_*.safetensors --json
     """
-    validated = [validate_safetensors(f) for f in files]
+    validated = [validate_safetensors(f, json_output=json_output) for f in files]
     rows = list_files(validated)
 
     if not rows:

@@ -7,6 +7,7 @@ demo.tape
 
 # AI agent documents
 .ai/
+docs/
 
 # Python
 __pycache__/

@@ -6,6 +6,7 @@ import json
 from enum import Enum
 from pathlib import Path
 
+from rich.json import JSON
 from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
@@ -75,8 +76,7 @@ class MetadataScreen(ModalScreen):
         width: 80%;
         max-width: 120;
         min-width: 60;
-        height: auto;
-        max-height: 80%;
+        height: 80%;
         background: $surface;
         border: thick $secondary;
         padding: 1 2;
@@ -89,8 +89,12 @@ class MetadataScreen(ModalScreen):
     }
 
     #metadata-scroll {
-        height: auto;
-        max-height: 60vh;
+        height: 1fr;
+        margin-top: 1;
+    }
+
+    #metadata-scroll:focus {
+        border-left: tall $secondary;
     }
 
     #metadata-content {
@@ -109,19 +113,46 @@ class MetadataScreen(ModalScreen):
         self.metadata = metadata
         self.file_path = file_path
 
+    @staticmethod
+    def _expand(metadata: dict) -> dict:
+        """Expand values that are themselves JSON-encoded strings so they render
+        as nested structures rather than one long escaped blob."""
+        expanded: dict = {}
+        for key, value in metadata.items():
+            if isinstance(value, str):
+                stripped = value.strip()
+                if stripped[:1] in "{[" or stripped in ("true", "false", "null"):
+                    try:
+                        expanded[key] = json.loads(stripped)
+                        continue
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+            expanded[key] = value
+        return expanded
+
     def compose(self) -> ComposeResult:
         with Container(id="metadata-container"):
             yield Label("File Metadata", id="metadata-title")
             yield Static(f"[dim]File:[/dim] {self.file_path.name}")
 
             if self.metadata:
-                formatted = json.dumps(self.metadata, indent=2)
-                with VerticalScroll(id="metadata-scroll"):
-                    yield Static(f"\n{formatted}", id="metadata-content")
+                formatted = json.dumps(self._expand(self.metadata), indent=2)
+                scroll = VerticalScroll(
+                    Static(JSON(formatted), id="metadata-content"),
+                    id="metadata-scroll",
+                )
+                scroll.can_focus = True
+                yield scroll
             else:
                 yield Static("\n[dim]No metadata found in file[/dim]")
 
-            yield Static("\n[dim]Press ESC or M to close[/dim]")
+            yield Static("\n[dim]Press ESC or M to close · ↑↓/PgUp/PgDn to scroll[/dim]")
+
+    def on_mount(self) -> None:
+        # Focus the scroll region so arrow / page keys scroll it immediately.
+        scroll = self.query("#metadata-scroll")
+        if scroll:
+            scroll.first().focus()
 
 
 class TensorStatsScreen(ModalScreen):

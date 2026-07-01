@@ -146,7 +146,9 @@ class MetadataScreen(ModalScreen):
             else:
                 yield Static("\n[dim]No metadata found in file[/dim]")
 
-            yield Static("\n[dim]Press ESC or M to close · ↑↓/PgUp/PgDn to scroll[/dim]")
+            yield Static(
+                "\n[dim]Press ESC or M to close · ↑↓/PgUp/PgDn to scroll[/dim]"
+            )
 
     def on_mount(self) -> None:
         # Focus the scroll region so arrow / page keys scroll it immediately.

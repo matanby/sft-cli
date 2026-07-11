@@ -11,6 +11,11 @@ from pathlib import Path
 
 import numpy as np
 
+from sft.ops.lora.conflict import (
+    gram_schmidt_orthogonalize,
+    norm_scale_factor,
+    validate_mode,
+)
 from sft.ops.lora.detect import LoRAInfo, detect_lora
 from sft.utils.tensor_io import read_tensors, write_file
 
@@ -56,14 +61,21 @@ def add_loras(
     dst: Path | None = None,
     output_rank: int | None = None,
     dry_run: bool = False,
+    mode: str = "none",
 ) -> AddResult:
     """Combine multiple LoRA adapters via weighted task arithmetic.
 
     1. Detect and validate each LoRA
-    2. Reconstruct per-module deltas (B @ A), compute weighted sum
-    3. SVD re-decompose at target rank
-    4. Write combined adapter
+    2. Reconstruct per-module deltas (B @ A)
+    3. Optionally transform each non-reference delta against the first
+       (reference) adapter's delta: ``norm-scaler`` rescales to the reference's
+       Frobenius norm, ``gram-schmidt`` removes the reference-aligned component
+    4. Compute the weighted sum
+    5. SVD re-decompose at target rank
+    6. Write combined adapter
     """
+    validate_mode(mode)
+
     if len(lora_paths) < 2:
         raise ValueError("Need at least 2 LoRA files to add")
 
@@ -101,26 +113,35 @@ def add_loras(
     ref_info = infos[0]
 
     for pair_idx, ref_pair in enumerate(ref_info.pairs):
-        delta_sum: np.ndarray | None = None
-
-        for lora_idx, (info, tensors) in enumerate(zip(infos, all_tensors)):
+        # Reconstruct every adapter's delta for this module first, so the
+        # reference (index 0) is available before the others are transformed.
+        deltas: list[np.ndarray] = []
+        for info, tensors in zip(infos, all_tensors):
             pair = info.pairs[pair_idx]
             lora_a = tensors[pair.lora_a_name].astype(np.float64)
             lora_b = tensors[pair.lora_b_name].astype(np.float64)
-            delta = lora_b @ lora_a
+            deltas.append(lora_b @ lora_a)
 
-            if delta_sum is None:
-                delta_sum = weights[lora_idx] * delta
-            else:
-                delta_sum += weights[lora_idx] * delta
+        ref_delta = deltas[0]
+        if mode == "norm-scaler":
+            for i in range(1, len(deltas)):
+                deltas[i] = norm_scale_factor(ref_delta, deltas[i]) * deltas[i]
+        elif mode == "gram-schmidt":
+            for i in range(1, len(deltas)):
+                deltas[i] = gram_schmidt_orthogonalize(ref_delta, deltas[i])
 
-        assert delta_sum is not None
+        delta_sum = weights[0] * deltas[0]
+        for i in range(1, len(deltas)):
+            delta_sum = delta_sum + weights[i] * deltas[i]
+
         a_new, b_new = _decompose_svd(delta_sum, rank)
         combined[ref_pair.lora_a_name] = a_new
         combined[ref_pair.lora_b_name] = b_new
 
     metadata = dict(infos[0].metadata)
     metadata["rank"] = str(rank)
+    if mode != "none":
+        metadata["conflict_mode"] = mode
 
     write_file(output_path, combined, metadata=metadata)
 

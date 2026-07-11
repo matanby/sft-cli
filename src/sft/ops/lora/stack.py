@@ -34,6 +34,10 @@ from pathlib import Path
 import numpy as np
 
 from sft.index import TensorIndex
+from sft.ops.lora.conflict import (
+    frob_inner_factored,
+    validate_mode,
+)
 from sft.ops.lora.detect import LoRAInfo, detect_lora
 from sft.ops.lora.svd import _qr_svd
 from sft.utils.tensor_io import read_tensors, write_file
@@ -86,16 +90,30 @@ def stack_loras(
     coeff_b: float = 1.0,
     target_rank: int | None = None,
     dry_run: bool = False,
+    mode: str = "none",
 ) -> StackResult:
     """Combine two PEFT LoRAs via lossless factor stacking.
 
     Both inputs must be PEFT-format LoRA adapters. Modules present in
     only one file are kept and scaled by that side's coefficient.
 
+    ``mode`` optionally resolves conflict with file A (the reference) before
+    stacking, staying lossless because both transforms are linear and fold
+    into the concatenated factors as a per-module coefficient tweak:
+
+      • ``norm-scaler``:   B's A-block coefficient becomes ``coeff_b · s`` with
+        ``s = ‖ΔW_a‖_F / ‖ΔW_b‖_F`` (matches file B's delta norm to A's).
+      • ``gram-schmidt``:  A's A-block coefficient becomes ``coeff_a − coeff_b · c``
+        with ``c = ⟨ΔW_a, ΔW_b⟩ / ⟨ΔW_a, ΔW_a⟩`` (removes the A-aligned part of B).
+
+    Scalars are computed in rank space, so the full delta is never formed.
+
     Raises:
-        ValueError: if either input is not a PEFT LoRA, or shapes within
-            a paired module are incompatible.
+        ValueError: if ``mode`` is invalid, either input is not a PEFT LoRA,
+            or shapes within a paired module are incompatible.
     """
+    validate_mode(mode)
+
     info_a = detect_lora(src_a)
     info_b = detect_lora(src_b)
     if info_a is None:
@@ -133,8 +151,24 @@ def stack_loras(
                 result.n_skipped_shape += 1
                 continue
 
+            # Effective A-block coefficients. The conflict transforms are linear
+            # in the deltas, so they fold losslessly into these scalars while
+            # merged_B stays a plain hstack (see the docstring).
+            eff_a = coeff_a
+            eff_b = coeff_b
+            if mode == "norm-scaler":
+                norm_a_sq = frob_inner_factored(A_a, B_a, A_a, B_a)
+                norm_b_sq = frob_inner_factored(A_b, B_b, A_b, B_b)
+                if norm_b_sq > 0.0:
+                    eff_b = coeff_b * float(np.sqrt(norm_a_sq / norm_b_sq))
+            elif mode == "gram-schmidt":
+                norm_a_sq = frob_inner_factored(A_a, B_a, A_a, B_a)
+                if norm_a_sq > 0.0:
+                    inner_ab = frob_inner_factored(A_a, B_a, A_b, B_b)
+                    eff_a = coeff_a - coeff_b * (inner_ab / norm_a_sq)
+
             merged_A = np.concatenate(
-                [coeff_a * A_a.astype(np.float32), coeff_b * A_b.astype(np.float32)],
+                [eff_a * A_a.astype(np.float32), eff_b * A_b.astype(np.float32)],
                 axis=0,
             ).astype(A_a.dtype)
             merged_B = np.concatenate(
@@ -212,8 +246,11 @@ def stack_loras(
                 "file_b": str(src_b.name),
                 "coeff_b": coeff_b,
                 "target_rank": target_rank,
+                "conflict_mode": mode,
             }
         )
+        if mode != "none":
+            metadata["conflict_mode"] = mode
         if target_rank is not None:
             metadata["rank"] = str(target_rank)
         write_file(dst, out_tensors, metadata=metadata)

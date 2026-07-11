@@ -60,7 +60,8 @@ Do **not** use `sft` for:
 | LoRA: check vs base | `sft lora compat base.safetensors adapter.safetensors` | Exit 1 if incompatible. |
 | LoRA: extract from delta | `sft lora extract base.safetensors ft.safetensors --rank 16` | |
 | LoRA: resize rank | `sft lora resize adapter.safetensors --rank 8` | Truncated SVD. |
-| LoRA: combine adapters | `sft lora add a.safetensors b.safetensors -w 0.7 -w 0.3` | Weighted task arithmetic. |
+| LoRA: combine adapters | `sft lora add a.safetensors b.safetensors -w 0.7 -w 0.3` | Weighted task arithmetic (lossy: re-decomposes to a fixed rank). `--mode norm-scaler`/`gram-schmidt` reduces conflict with the first (reference) adapter. |
+| LoRA: lossless stack | `sft lora stack a.safetensors b.safetensors` | Factor-stacking merge, exact at rank r_a+r_b. `--mode norm-scaler`/`gram-schmidt` (vs file A, the reference) stays lossless. |
 | LoRA: convert Kohya↔PEFT | `sft lora convert adapter.safetensors --to peft` | |
 | LoRA: merge into base | `sft lora merge base.safetensors adapter.safetensors` | |
 

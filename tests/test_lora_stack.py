@@ -10,6 +10,7 @@ from safetensors.numpy import load_file, save_file
 from typer.testing import CliRunner
 
 from sft.cli import app
+from sft.ops.lora.detect import detect_lora
 from sft.ops.lora.stack import stack_loras
 
 runner = CliRunner()
@@ -326,6 +327,107 @@ class TestPassthroughCollisions:
         assert result.collisions == []
 
 
+MODULES = (
+    "base_model.model.layers.0.q_proj",
+    "base_model.model.layers.0.v_proj",
+)
+
+
+class TestConflictModes:
+    """--mode transforms file B against file A (reference) but stays lossless."""
+
+    def test_norm_scaler_lossless_and_matches_norm(
+        self, lora_a: Path, lora_b: Path, tmp_path: Path
+    ) -> None:
+        dst = tmp_path / "out.safetensors"
+        ca, cb = 0.7, 0.3
+        stack_loras(lora_a, lora_b, dst, coeff_a=ca, coeff_b=cb, mode="norm-scaler")
+
+        ta, tb, out = (
+            load_file(str(lora_a)),
+            load_file(str(lora_b)),
+            load_file(str(dst)),
+        )
+        for module in MODULES:
+            dw_a = (
+                ta[f"{module}.lora_B.weight"] @ ta[f"{module}.lora_A.weight"]
+            ).astype(np.float64)
+            dw_b = (
+                tb[f"{module}.lora_B.weight"] @ tb[f"{module}.lora_A.weight"]
+            ).astype(np.float64)
+            s = np.linalg.norm(dw_a) / np.linalg.norm(dw_b)
+            expected = ca * dw_a + cb * s * dw_b
+            actual = out[f"{module}.lora_B.weight"] @ out[f"{module}.lora_A.weight"]
+            np.testing.assert_allclose(actual, expected, atol=1e-5)
+            # scaled B delta matches A's norm
+            assert np.isclose(np.linalg.norm(s * dw_b), np.linalg.norm(dw_a))
+
+    def test_gram_schmidt_lossless_and_orthogonal(
+        self, lora_a: Path, lora_b: Path, tmp_path: Path
+    ) -> None:
+        dst = tmp_path / "out.safetensors"
+        ca, cb = 0.7, 0.3
+        stack_loras(lora_a, lora_b, dst, coeff_a=ca, coeff_b=cb, mode="gram-schmidt")
+
+        ta, tb, out = (
+            load_file(str(lora_a)),
+            load_file(str(lora_b)),
+            load_file(str(dst)),
+        )
+        for module in MODULES:
+            dw_a = (
+                ta[f"{module}.lora_B.weight"] @ ta[f"{module}.lora_A.weight"]
+            ).astype(np.float64)
+            dw_b = (
+                tb[f"{module}.lora_B.weight"] @ tb[f"{module}.lora_A.weight"]
+            ).astype(np.float64)
+            c = np.sum(dw_a * dw_b) / np.sum(dw_a * dw_a)
+            dw_b_ortho = dw_b - c * dw_a
+            expected = ca * dw_a + cb * dw_b_ortho
+            actual = out[f"{module}.lora_B.weight"] @ out[f"{module}.lora_A.weight"]
+            np.testing.assert_allclose(actual, expected, atol=1e-5)
+            # the removed component is orthogonal to the reference delta
+            overlap = abs(np.sum(dw_a * dw_b_ortho))
+            assert overlap <= 1e-9 * np.linalg.norm(dw_a) * np.linalg.norm(dw_b)
+
+    def test_mode_noop_on_single_side(self, tmp_path: Path) -> None:
+        """Modules present in only one file are untouched by any mode."""
+        rng = np.random.RandomState(0)
+        only_a = (
+            rng.randn(2, 4).astype(np.float32),
+            rng.randn(4, 2).astype(np.float32),
+        )
+        a = _make_lora(tmp_path / "a.safetensors", {"base_model.model.q": only_a})
+        b = _make_lora(
+            tmp_path / "b.safetensors",
+            {"base_model.model.other": only_a},
+        )
+        dst = tmp_path / "out.safetensors"
+        stack_loras(a, b, dst, coeff_a=0.5, coeff_b=2.0, mode="gram-schmidt")
+        out = load_file(str(dst))
+        np.testing.assert_allclose(
+            out["base_model.model.q.lora_A.weight"], 0.5 * only_a[0], atol=1e-6
+        )
+        np.testing.assert_allclose(
+            out["base_model.model.other.lora_A.weight"], 2.0 * only_a[0], atol=1e-6
+        )
+
+    def test_metadata_records_mode(
+        self, lora_a: Path, lora_b: Path, tmp_path: Path
+    ) -> None:
+        dst = tmp_path / "out.safetensors"
+        stack_loras(lora_a, lora_b, dst, mode="norm-scaler")
+        info = detect_lora(dst)
+        assert info is not None
+        assert info.metadata.get("conflict_mode") == "norm-scaler"
+
+    def test_invalid_mode_raises(
+        self, lora_a: Path, lora_b: Path, tmp_path: Path
+    ) -> None:
+        with pytest.raises(ValueError, match="Invalid mode"):
+            stack_loras(lora_a, lora_b, tmp_path / "out.safetensors", mode="bogus")
+
+
 class TestErrors:
     def test_rejects_non_lora(
         self, mini_model: Path, lora_a: Path, tmp_path: Path
@@ -387,3 +489,30 @@ class TestCli:
         assert result.exit_code == 0, result.output
         expected = lora_a.parent / "a.stack.safetensors"
         assert expected.exists()
+
+    def test_cli_gram_schmidt_mode(
+        self, lora_a: Path, lora_b: Path, tmp_path: Path
+    ) -> None:
+        dst = tmp_path / "out.safetensors"
+        result = runner.invoke(
+            app,
+            [
+                "lora",
+                "stack",
+                str(lora_a),
+                str(lora_b),
+                "--mode",
+                "gram-schmidt",
+                "-o",
+                str(dst),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Mode:                 gram-schmidt" in result.output
+        assert dst.exists()
+
+    def test_cli_invalid_mode(self, lora_a: Path, lora_b: Path) -> None:
+        result = runner.invoke(
+            app, ["lora", "stack", str(lora_a), str(lora_b), "--mode", "bogus"]
+        )
+        assert result.exit_code == 2

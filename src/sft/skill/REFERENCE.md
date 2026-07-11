@@ -160,10 +160,13 @@ Supports `--json` (use this when parsing the output).
 Combine LoRA adapters via weighted task arithmetic.
 
 Adds multiple LoRA deltas together with optional per-adapter weights.
+Note: `add` re-decomposes the weighted sum to a fixed output rank (lossy);
+for a lossless combination see `sft lora stack`.
 
 Examples:
   sft lora add style.safetensors content.safetensors -o combined.safetensors
   sft lora add a.safetensors b.safetensors -w 0.7 -w 0.3
+  sft lora add a.safetensors b.safetensors --mode gram-schmidt
   sft lora add a.safetensors b.safetensors --rank 16 --dry-run
 
 **Parameters:**
@@ -172,6 +175,7 @@ Examples:
 - `--weights`/`-w` — option. Weight for each LoRA (default: equal weights).
 - `--rank`/`-r` — option. Output rank (default: same as input).
 - `-o`/`--output` — option. Output path (default: combined.safetensors).
+- `--mode` — option. Conflict resolution vs the first (reference) adapter, applied to each other adapter before combining: 'none', 'norm-scaler' (rescale to the reference's Frobenius norm), or 'gram-schmidt' (remove the reference-aligned component).
 - `--dry-run` — flag. Show what would be combined without writing.
 
 ## `sft lora compat`
@@ -300,6 +304,10 @@ Lossless weighted stack of two PEFT LoRAs.
 Per module, stacks low-rank factors so the effective delta is
 `a · (B_a @ A_a) + b · (B_b @ A_b)` exactly, with merged rank `r_a + r_b`.
 
+`--mode` resolves conflict with file A (the reference) before stacking and
+stays lossless: `norm-scaler` matches file B's delta norm to A's;
+`gram-schmidt` removes the component of B aligned with A.
+
 Modules in only one file are kept and scaled by that side's coefficient.
 Non-LoRA tensors are passed through; collisions (same name, different
 values) produce warnings. Use `sft lora convert` first on Kohya files.
@@ -309,6 +317,7 @@ For lossy combination at a fixed output rank, see `sft lora add`.
 Examples:
   sft lora stack a.safetensors b.safetensors
   sft lora stack a.safetensors b.safetensors -a 0.7 -b 0.3 -o mix.safetensors
+  sft lora stack a.safetensors b.safetensors --mode gram-schmidt
   sft lora stack a.safetensors b.safetensors --target-rank 32
 
 **Parameters:**
@@ -319,6 +328,7 @@ Examples:
 - `-b`/`--coeff-b` — option. Coefficient applied to file B.
 - `-o`/`--output` — option. Output path (default: {a_stem}.stack.safetensors).
 - `--target-rank`/`-r` — option. If set, SVD-truncate each merged pair back to this rank. Default: keep the lossless merged rank (r_a + r_b).
+- `--mode` — option. Conflict resolution vs file A (the reference), applied to file B before stacking: 'none', 'norm-scaler' (rescale to A's Frobenius norm), or 'gram-schmidt' (remove the A-aligned component). All modes stay lossless (merged rank r_a + r_b).
 - `--dry-run` — flag. Show counts and warnings without writing.
 
 ## `sft lora svd`

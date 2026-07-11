@@ -7,10 +7,20 @@ from pathlib import Path
 import numpy as np
 import pytest
 from safetensors.numpy import save_file
+from typer.testing import CliRunner
 
+from sft.cli import app
 from sft.ops.lora.add import add_loras
+from sft.ops.lora.conflict import (
+    frob_inner_factored,
+    gram_schmidt_orthogonalize,
+    norm_scale_factor,
+    validate_mode,
+)
 from sft.ops.lora.detect import detect_lora
 from sft.utils.tensor_io import read_tensors
+
+runner = CliRunner()
 
 
 @pytest.fixture
@@ -133,3 +143,145 @@ def test_add_incompatible_error(
         add_loras(
             [lora_adapter, mini_model], weights=None, dst=tmp_path / "out.safetensors"
         )
+
+
+# --- Conflict-resolution helpers (pure functions) --------------------------
+
+A_KEY = "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"
+B_KEY = "base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight"
+
+
+def test_norm_scale_factor_matches_reference_norm() -> None:
+    rng = np.random.RandomState(0)
+    dw1 = rng.randn(8, 8)
+    dw2 = 3.7 * rng.randn(8, 8)
+    s = norm_scale_factor(dw1, dw2)
+    assert np.isclose(np.linalg.norm(s * dw2), np.linalg.norm(dw1))
+
+
+def test_norm_scale_factor_zero_other_is_noop() -> None:
+    dw1 = np.ones((4, 4))
+    dw2 = np.zeros((4, 4))
+    assert norm_scale_factor(dw1, dw2) == 1.0
+
+
+def test_gram_schmidt_orthogonalize_is_orthogonal() -> None:
+    rng = np.random.RandomState(1)
+    dw1 = rng.randn(8, 8)
+    dw2 = rng.randn(8, 8)
+    dw2_ortho = gram_schmidt_orthogonalize(dw1, dw2)
+    overlap = abs(np.sum(dw1 * dw2_ortho))
+    scale = np.linalg.norm(dw1) * np.linalg.norm(dw2)
+    assert overlap <= 1e-9 * scale
+
+
+def test_gram_schmidt_orthogonalize_zero_ref_is_noop() -> None:
+    dw1 = np.zeros((4, 4))
+    dw2 = np.arange(16, dtype=np.float64).reshape(4, 4)
+    np.testing.assert_array_equal(gram_schmidt_orthogonalize(dw1, dw2), dw2)
+
+
+def test_frob_inner_factored_matches_dense() -> None:
+    rng = np.random.RandomState(2)
+    a1 = rng.randn(4, 8).astype(np.float32)
+    b1 = rng.randn(8, 4).astype(np.float32)
+    a2 = rng.randn(4, 8).astype(np.float32)
+    b2 = rng.randn(8, 4).astype(np.float32)
+    dense = float(np.sum((b1 @ a1) * (b2 @ a2)))
+    assert np.isclose(frob_inner_factored(a1, b1, a2, b2), dense, rtol=1e-5)
+
+
+def test_validate_mode_rejects_unknown() -> None:
+    with pytest.raises(ValueError, match="Invalid mode"):
+        validate_mode("bogus")
+
+
+# --- add --mode integration -------------------------------------------------
+
+
+def test_add_norm_scaler_exact(lora_pair: tuple[Path, Path], tmp_path: Path) -> None:
+    """On the shared-column-space fixture the combined delta is recoverable at
+    rank 4, so it equals w0·dw1 + w1·(s·dw2) exactly."""
+    p1, p2 = lora_pair
+    out = tmp_path / "ns.safetensors"
+    add_loras([p1, p2], weights=None, dst=out, mode="norm-scaler")
+
+    t1, t2, out_t = read_tensors(p1), read_tensors(p2), read_tensors(out)
+    dw1 = (t1[B_KEY] @ t1[A_KEY]).astype(np.float64)
+    dw2 = (t2[B_KEY] @ t2[A_KEY]).astype(np.float64)
+    s = norm_scale_factor(dw1, dw2)
+    expected = 0.5 * dw1 + 0.5 * (s * dw2)
+    actual = out_t[B_KEY] @ out_t[A_KEY]
+    np.testing.assert_allclose(actual, expected, atol=1e-5)
+
+    assert detect_lora(out).metadata.get("conflict_mode") == "norm-scaler"
+
+
+def test_add_gram_schmidt_exact(lora_pair: tuple[Path, Path], tmp_path: Path) -> None:
+    p1, p2 = lora_pair
+    out = tmp_path / "gs.safetensors"
+    add_loras([p1, p2], weights=None, dst=out, mode="gram-schmidt")
+
+    t1, t2, out_t = read_tensors(p1), read_tensors(p2), read_tensors(out)
+    dw1 = (t1[B_KEY] @ t1[A_KEY]).astype(np.float64)
+    dw2 = (t2[B_KEY] @ t2[A_KEY]).astype(np.float64)
+    dw2_ortho = gram_schmidt_orthogonalize(dw1, dw2)
+    expected = 0.5 * dw1 + 0.5 * dw2_ortho
+    actual = out_t[B_KEY] @ out_t[A_KEY]
+    np.testing.assert_allclose(actual, expected, atol=1e-5)
+
+
+def test_add_mode_changes_output(lora_pair: tuple[Path, Path], tmp_path: Path) -> None:
+    p1, p2 = lora_pair
+    none_out = tmp_path / "none.safetensors"
+    gs_out = tmp_path / "gs.safetensors"
+    add_loras([p1, p2], weights=None, dst=none_out, mode="none")
+    add_loras([p1, p2], weights=None, dst=gs_out, mode="gram-schmidt")
+
+    t_none, t_gs = read_tensors(none_out), read_tensors(gs_out)
+    recon_none = t_none[B_KEY] @ t_none[A_KEY]
+    recon_gs = t_gs[B_KEY] @ t_gs[A_KEY]
+    assert not np.allclose(recon_none, recon_gs, atol=1e-6)
+
+
+def test_add_zero_second_delta_leaves_reference(tmp_path: Path) -> None:
+    """A zero-delta second adapter makes both modes no-ops: output == reference."""
+    t1 = {A_KEY: np.eye(4, 8, dtype=np.float32), B_KEY: np.eye(8, 4, dtype=np.float32)}
+    t2 = {
+        A_KEY: np.zeros((4, 8), dtype=np.float32),
+        B_KEY: np.zeros((8, 4), dtype=np.float32),
+    }
+    p1, p2 = tmp_path / "a.safetensors", tmp_path / "b.safetensors"
+    save_file(t1, str(p1), metadata={"rank": "4"})
+    save_file(t2, str(p2), metadata={"rank": "4"})
+
+    for mode in ("norm-scaler", "gram-schmidt"):
+        out = tmp_path / f"{mode}.safetensors"
+        # weights [1, 1] so the reference is not down-scaled.
+        add_loras([p1, p2], weights=[1.0, 1.0], dst=out, mode=mode)
+        out_t = read_tensors(out)
+        dw1 = np.eye(8, 4, dtype=np.float32) @ np.eye(4, 8, dtype=np.float32)
+        np.testing.assert_allclose(out_t[B_KEY] @ out_t[A_KEY], dw1, atol=1e-5)
+
+
+def test_add_invalid_mode_raises(lora_pair: tuple[Path, Path], tmp_path: Path) -> None:
+    p1, p2 = lora_pair
+    with pytest.raises(ValueError, match="Invalid mode"):
+        add_loras([p1, p2], weights=None, dst=tmp_path / "o.safetensors", mode="bogus")
+
+
+def test_cli_add_mode(lora_pair: tuple[Path, Path], tmp_path: Path) -> None:
+    p1, p2 = lora_pair
+    out = tmp_path / "out.safetensors"
+    result = runner.invoke(
+        app, ["lora", "add", str(p1), str(p2), "--mode", "norm-scaler", "-o", str(out)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "Mode: norm-scaler" in result.output
+    assert out.exists()
+
+
+def test_cli_add_invalid_mode(lora_pair: tuple[Path, Path]) -> None:
+    p1, p2 = lora_pair
+    result = runner.invoke(app, ["lora", "add", str(p1), str(p2), "--mode", "bogus"])
+    assert result.exit_code == 2
